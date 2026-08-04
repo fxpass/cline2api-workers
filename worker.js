@@ -21,9 +21,13 @@
 
 const CLINE_API_BASE = "https://api.cline.bot/api/v1";
 
-// 内存缓存：accessToken + 过期时间
-let cachedAccessToken = null;
-let cachedExpiry = 0; // unix ms
+// 账号池：支持多个 Cline 账号，每个账号独立缓存 accessToken
+// CLINE_REFRESH_TOKEN 环境变量可包含多行，每行一个 refreshToken，
+// 额度用尽(空响应)时自动轮换下一个账号。
+// 结构：{ refreshToken, accessToken, expiry, cooldownUntil }
+let accounts = [];
+let accountIndex = 0;          // round-robin 游标
+let currentAccount = null;     // 当前正在使用的账号（串行队列下安全）
 
 // 模型列表（实测可用性见 README）
 // 注意：cline-free/* 被官方客户端锁定（403），cline-pass/* 需付费订阅，
@@ -54,11 +58,13 @@ export default {
 
     // 健康诊断端点（无需鉴权，用于排查环境变量是否生效）
     if (request.method === "GET" && url.pathname === "/v1/health") {
+      const poolN = parseAccounts(env).length;
       return jsonResponse({
         ok: true,
         api_key_configured: !!(env.API_KEY),
         api_key_prefix: env.API_KEY ? env.API_KEY.slice(0, 6) + "..." : "(未配置，用默认 cline2api-default-key)",
-        refresh_token_configured: !!(env.CLINE_REFRESH_TOKEN && env.CLINE_REFRESH_TOKEN.length > 8),
+        refresh_token_configured: poolN > 0,
+        account_count: poolN,
         model: DEFAULT_MODEL,
       }, 200);
     }
@@ -93,47 +99,113 @@ export default {
 // Token 管理
 // ---------------------------------------------------------------------------
 
-async function getAccessToken(env) {
-  const refreshToken = env.CLINE_REFRESH_TOKEN;
-  if (!refreshToken) {
-    throw new Error("缺少 CLINE_REFRESH_TOKEN 环境变量");
-  }
-  if (cachedAccessToken && Date.now() < cachedExpiry) {
-    return cachedAccessToken;
-  }
+// 从环境变量解析账号池：CLINE_REFRESH_TOKEN 每行一个
+function parseAccounts(env) {
+  const raw = env.CLINE_REFRESH_TOKEN || "";
+  const tokens = raw.split("\n").map((s) => s.trim()).filter((s) => s.length > 8);
+  if (tokens.length === 0) return [];
 
+  // 若 token 列表变化（增删账号），重建账号池
+  const changed =
+    accounts.length !== tokens.length ||
+    accounts.some((a, i) => a.refreshToken !== tokens[i]);
+  if (changed) {
+    accounts = tokens.map((rt) => ({
+      refreshToken: rt,
+      accessToken: null,
+      expiry: 0,
+      cooldownUntil: 0,
+    }));
+  }
+  return accounts;
+}
+
+// 取得当前账号的 accessToken（独立缓存，失效/冷却则刷新）
+async function getAccountToken(account) {
+  const now = Date.now();
+  // 冷却期内不可用
+  if (account.cooldownUntil > now) {
+    throw new Error("account_cooldown");
+  }
+  if (account.accessToken && now < account.expiry) {
+    return account.accessToken;
+  }
   const resp = await fetch(CLINE_API_BASE + "/auth/refresh", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      refreshToken: refreshToken,
+      refreshToken: account.refreshToken,
       grantType: "refresh_token",
     }),
   });
   if (!resp.ok) {
-    throw new Error("刷新 token 失败: " + resp.status + " " + (await resp.text()).slice(0, 200));
+    // 刷新失败：冷却 60s，交给上层切号
+    account.cooldownUntil = now + 60 * 1000;
+    throw new Error("refresh_failed");
   }
   const data = await resp.json();
   const accessToken = data?.data?.accessToken;
   if (!accessToken) {
-    throw new Error("刷新 token 响应缺少 accessToken");
+    account.cooldownUntil = now + 60 * 1000;
+    throw new Error("refresh_no_token");
   }
-  cachedAccessToken = accessToken;
-  // 过期时间：优先用服务端返回，兜底 10 分钟
+  account.accessToken = accessToken;
+  // 过期时间：优先服务端，兜底 10 分钟，留 60s 余量
   const expiresAt = data?.data?.expiresAt;
-  let expiry = Date.now() + 10 * 60 * 1000;
+  let expiry = now + 10 * 60 * 1000;
   if (typeof expiresAt === "number") {
     expiry = expiresAt;
   } else if (typeof expiresAt === "string") {
     const t = Date.parse(expiresAt);
     if (!isNaN(t)) expiry = t;
   }
-  // 留 60s 余量
-  cachedExpiry = expiry - 60000;
+  account.expiry = expiry - 60000;
   return accessToken;
 }
 
+// 轮询选择一个可用账号，返回该账号对象（并设置 currentAccount）
+function pickAccount(pool) {
+  for (let k = 0; k < pool.length; k++) {
+    const acc = pool[accountIndex % pool.length];
+    accountIndex = (accountIndex + 1) % pool.length;
+    if (!acc.cooldownUntil || acc.cooldownUntil <= Date.now()) {
+      currentAccount = acc;
+      return acc;
+    }
+  }
+  return null; // 全部冷却中
+}
+
+async function getAccessToken(env) {
+  const pool = parseAccounts(env);
+  if (pool.length === 0) {
+    throw new Error("缺少 CLINE_REFRESH_TOKEN 环境变量");
+  }
+  // 最多尝试 pool.length 个账号（跳过冷却/刷新失败的）
+  for (let attempt = 0; attempt < pool.length; attempt++) {
+    const acc = pool[attempt % pool.length]; // 逐个尝试
+    if (acc.cooldownUntil && acc.cooldownUntil > Date.now()) continue;
+    currentAccount = acc;
+    try {
+      return await getAccountToken(acc);
+    } catch (e) {
+      if (e.message === "account_cooldown") continue;
+      continue; // 刷新失败也切下个号
+    }
+  }
+  // 全部失败，清冷却重试一次最早的
+  const acc = pool[0];
+  currentAccount = acc;
+  acc.cooldownUntil = 0;
+  try {
+    return await getAccountToken(acc);
+  } catch (e) {
+    throw new Error("所有账号刷新 token 均失败");
+  }
+}
+
 async function clineFetch(env, path, bodyObj, sessionId, retried = false) {
+  const acc = currentAccount || null;
   const token = await getAccessToken(env);
   const headers = {
     Authorization: "Bearer workos:" + token,
@@ -146,9 +218,12 @@ async function clineFetch(env, path, bodyObj, sessionId, retried = false) {
     body: JSON.stringify(bodyObj),
   });
   if (resp.status === 401 && !retried) {
-    // 强制刷新 token 重试一次
-    cachedAccessToken = null;
-    cachedExpiry = 0;
+    // token 失效：标记当前账号冷却，强制重试（会用别的账号/刷新）
+    if (currentAccount) {
+      currentAccount.cooldownUntil = Date.now() + 60 * 1000;
+      currentAccount.accessToken = null;
+      currentAccount.expiry = 0;
+    }
     return clineFetch(env, path, bodyObj, sessionId, true);
   }
   return resp;
@@ -173,19 +248,22 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-// 带重试的 clineFetch：空响应/5xx 自动指数退避重试
+// 带重试的 clineFetch：空响应/5xx 自动切换账号 + 指数退避重试
+// 空响应(额度用完)会冷却当前账号，下次自动轮换到下一个号
 // isStream=true 时跳过 body 空响应检测（SSE 流不能整体 read，交给调用方处理）
 async function clineFetchWithRetry(env, path, bodyObj, sessionId, isStream = false, maxRetries = 4) {
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     // 通过队列串行执行，避免并发空响应
     const resp = await enqueue(() => clineFetch(env, path, bodyObj, sessionId));
+    let hitEmpty = false;
+
     if (resp.ok && !isStream) {
       // 非流式：额外检测上游 200 但 body 是空响应包装
       const text = await resp.clone().text();
       if (!text.includes("empty response content")) {
         return resp;
       }
-      // 命中空响应：属于限流，等待后重试
+      hitEmpty = true;
       console.log(`[retry] empty response content (attempt ${attempt + 1}/${maxRetries})`);
     } else if (isStream) {
       // 流式：只要 HTTP 200 就直接转发，空流/错误由流式处理器判断
@@ -198,8 +276,24 @@ async function clineFetchWithRetry(env, path, bodyObj, sessionId, isStream = fal
       if (!errText.includes("empty response content")) {
         return resp; // 其他 5xx，不盲目重试
       }
+      hitEmpty = true;
       console.log(`[retry] 5xx empty (attempt ${attempt + 1}/${maxRetries})`);
     }
+
+    if (hitEmpty) {
+      // 额度用完：冷却当前账号，下一轮自动切到下个号
+      if (currentAccount) {
+        currentAccount.cooldownUntil = Date.now() + 60 * 1000;
+        currentAccount.accessToken = null;
+        currentAccount.expiry = 0;
+        console.log(`[account-switch] 账号额度用完，标记冷却，切换到下一个`);
+      }
+      // 切号后短退避，避免全部同时冷却
+      const short = 500 + Math.floor(Math.random() * 500);
+      await sleep(short);
+      continue;
+    }
+
     // 指数退避：约 1.5s, 3s, 6s, 12s（免费通道拥挤时空响应可持续数秒）
     const backoff = Math.min(1500 * Math.pow(2, attempt), 12000);
     console.log(`[retry] waiting ${backoff}ms...`);
