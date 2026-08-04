@@ -32,7 +32,31 @@ python3 cline_oauth.py
 > 2. 轮询 `api.workos.com/.../authenticate` → 授权成功后拿 WorkOS access_token
 > 3. `POST api.cline.bot/api/v1/auth/register` → 用 WorkOS token 换 Cline 的 refreshToken
 
-### 方式②：在原版 Go 程序里提取（如果你已经用过 cline2api）
+### 方式②：GitHub Actions 工作流（无需本地环境，手机上也能操作）⭐
+
+仓库自带 `.github/workflows/get-token.yml` 工作流，**在手机上也能跑**：你只需在手机浏览器点开 TG 推送的授权链接完成登录，脚本在云端自动轮询，拿到的 refreshToken **只私发到你的 Telegram，绝不进 Actions 日志**。
+
+**第一步：配置 TG 变量（强制，不配不运行）**
+
+在仓库 **Settings → Secrets and variables → Actions** 里添加两个 secret：
+- `TG_BOT_TOKEN`：你的 Telegram Bot 的 token
+- `TG_CHAT_ID`：接收消息的 chat_id（你自己的 id）
+
+> 缺任一个，工作流都会直接报错退出，不进入授权流程。
+
+**第二步：手动触发**
+
+1. 进入仓库 **Actions** 页 → 点击左侧 **「获取 Cline refreshToken」**
+2. 点右边 **Run workflow** → 可选手动填授权等待秒数（默认 300）→ 运行
+3. Telegram 会收到**授权链接 + 设备码** → 用手机/电脑浏览器打开，Google/GitHub/邮箱 登录授权
+4. 授权成功 → TG 收到 **`refreshToken`**，直接复制填入 CF Worker 机密变量即可
+
+**安全说明：**
+- 🔒 `refreshToken` 与账号**邮箱都不会出现在 Actions 日志**（`::add-mask::` 双重打码 + 只推 TG）
+- 🔁 工作流运行完自动**清理旧运行记录，只保留最新 1 条**
+- ⏱️ 授权链接推送 TG 失败会中止，宁可失败也不把 token 写进日志
+
+### 方式③：在原版 Go 程序里提取（如果你已经用过 cline2api）
 
 1. 下载原版 [cline2api releases](https://github.com/luawei1/cline2api/releases) 的运行文件
 2. 运行 `./cline-proxy --login`，浏览器登录 Cline
@@ -168,6 +192,8 @@ Model:    deepseek/deepseek-v4-flash   （默认）
 .
 ├── worker.js          # 主 Worker 代码（部署核心）
 ├── cline_oauth.py     # 获取 CLINE_REFRESH_TOKEN 的脚本 ⭐
+├── .github/workflows/
+│   └── get-token.yml  # 手动运行的工作流：在 TG 上获取 refreshToken
 ├── wrangler.toml      # (可选) wrangler 命令行部署配置，用复制代码方式可忽略
 ├── test_request.json  # 测试请求示例
 └── README.md          # 本文件
