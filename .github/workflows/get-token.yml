@@ -10,6 +10,10 @@ on:
         default: "300"
         type: string
 
+permissions:
+  actions: write
+  contents: write
+
 jobs:
   oauth:
     runs-on: ubuntu-latest
@@ -39,3 +43,19 @@ jobs:
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           OAUTH_POLL_TIMEOUT: ${{ inputs.poll_timeout }}
         run: python3 cline_oauth.py
+
+      # 清理旧 run jobs：只保留最新 1 条运行记录
+      - name: clear old run jobs
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          runs=$(gh run list --workflow="${{ github.workflow }}" --limit=100 --json databaseId --jq '.[].databaseId')
+          count=0
+          for run_id in $runs; do
+            count=$((count + 1))
+            if [ $count -gt 1 ]; then
+              echo "deleted: $run_id"
+              gh run delete $run_id || true
+            fi
+          done

@@ -172,7 +172,10 @@ def main():
         sys.exit(1)
 
     email = (data.get("userInfo") or {}).get("email", "unknown")
+    # 邮箱同样视为敏感信息：打码，避免进入 Actions 日志
+    mask_value(email)
     print("\n" + "=" * 60)
+    # 打码后显示，日志里是 ***
     print(f"✅ 登录成功! 账号: {email}")
 
     # 关键安全点：CI + 配置了 TG 时，refreshToken 只推 TG，绝不打印到日志
