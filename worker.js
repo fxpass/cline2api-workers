@@ -155,6 +155,61 @@ async function clineFetch(env, path, bodyObj, sessionId, retried = false) {
 }
 
 // ---------------------------------------------------------------------------
+// 并发限流队列：上游免费通道并发超过 1 就返回空响应，这里强制串行 + 间隔
+// ---------------------------------------------------------------------------
+
+let queueTail = Promise.resolve(); // 全局串行队列尾巴
+const MIN_GAP_MS = 800;            // 两次上游请求最小间隔
+
+function enqueue(fn) {
+  // 前一个任务结束后，等待间隔，再执行 fn
+  const run = queueTail.then(() => sleep(MIN_GAP_MS)).then(fn);
+  // 不管成功失败都继续链，避免队列断裂
+  queueTail = run.catch(() => {});
+  return run;
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+// 带重试的 clineFetch：空响应/5xx 自动指数退避重试
+// isStream=true 时跳过 body 空响应检测（SSE 流不能整体 read，交给调用方处理）
+async function clineFetchWithRetry(env, path, bodyObj, sessionId, isStream = false, maxRetries = 4) {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    // 通过队列串行执行，避免并发空响应
+    const resp = await enqueue(() => clineFetch(env, path, bodyObj, sessionId));
+    if (resp.ok && !isStream) {
+      // 非流式：额外检测上游 200 但 body 是空响应包装
+      const text = await resp.clone().text();
+      if (!text.includes("empty response content")) {
+        return resp;
+      }
+      // 命中空响应：属于限流，等待后重试
+      console.log(`[retry] empty response content (attempt ${attempt + 1}/${maxRetries})`);
+    } else if (isStream) {
+      // 流式：只要 HTTP 200 就直接转发，空流/错误由流式处理器判断
+      return resp;
+    } else if (resp.status !== 500 && resp.status !== 502 && resp.status !== 503 && resp.status !== 504) {
+      // 非 5xx 错误（如 403/400）不重试，直接返回
+      return resp;
+    } else {
+      const errText = await resp.clone().text();
+      if (!errText.includes("empty response content")) {
+        return resp; // 其他 5xx，不盲目重试
+      }
+      console.log(`[retry] 5xx empty (attempt ${attempt + 1}/${maxRetries})`);
+    }
+    // 指数退避：约 1.5s, 3s, 6s, 12s（免费通道拥挤时空响应可持续数秒）
+    const backoff = Math.min(1500 * Math.pow(2, attempt), 12000);
+    console.log(`[retry] waiting ${backoff}ms...`);
+    await sleep(backoff);
+  }
+  // 全部重试失败，返回最后一次响应
+  return enqueue(() => clineFetch(env, path, bodyObj, sessionId));
+}
+
+// ---------------------------------------------------------------------------
 // OpenAI 协议
 // ---------------------------------------------------------------------------
 
@@ -190,7 +245,7 @@ async function handleChat(request, env) {
   }
 
   try {
-    const resp = await clineFetch(env, "/chat/completions", body, sessionId);
+    const resp = await clineFetchWithRetry(env, "/chat/completions", body, sessionId, isStream);
     if (!resp.ok) {
       const errText = await resp.text();
       return jsonResponse({ error: { message: "upstream error: " + errText.slice(0, 300), type: "api_error" } }, resp.status);
@@ -256,7 +311,7 @@ async function handleAnthropic(request, env) {
   }
 
   try {
-    const resp = await clineFetch(env, "/chat/completions", body, sessionId);
+    const resp = await clineFetchWithRetry(env, "/chat/completions", body, sessionId, isStream);
     if (!resp.ok) {
       const errText = await resp.text();
       return jsonResponse({ error: { message: "upstream error: " + errText.slice(0, 300), type: "api_error" } }, resp.status);
