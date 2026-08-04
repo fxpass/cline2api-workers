@@ -52,6 +52,17 @@ export default {
       });
     }
 
+    // 健康诊断端点（无需鉴权，用于排查环境变量是否生效）
+    if (request.method === "GET" && url.pathname === "/v1/health") {
+      return jsonResponse({
+        ok: true,
+        api_key_configured: !!(env.API_KEY),
+        api_key_prefix: env.API_KEY ? env.API_KEY.slice(0, 6) + "..." : "(未配置，用默认 cline2api-default-key)",
+        refresh_token_configured: !!(env.CLINE_REFRESH_TOKEN && env.CLINE_REFRESH_TOKEN.length > 8),
+        model: DEFAULT_MODEL,
+      }, 200);
+    }
+
     // 全局鉴权：所有端点都需要 API Key（除 OPTIONS 预检）
     // 若未配置 API_KEY，则使用内置默认 key "cline2api-default-key"
     // (可选) 设 API_KEY="" 表示完全关闭鉴权
