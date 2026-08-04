@@ -52,8 +52,15 @@ export default {
       });
     }
 
+    // 全局鉴权：所有端点都需要 API Key（除 OPTIONS 预检）
+    // 若未配置 API_KEY，则使用内置默认 key "cline2api-default-key"
+    // (可选) 设 API_KEY="" 表示完全关闭鉴权
     // GET /v1/models
     if (request.method === "GET" && (url.pathname === "/v1/models" || url.pathname === "/models")) {
+      const key = getApiKey(request, env);
+      if (!key) {
+        return jsonResponse({ error: { message: "Invalid API key", type: "auth_error" } }, 401);
+      }
       return handleModels();
     }
 
@@ -418,13 +425,16 @@ function handleModels() {
 }
 
 function getApiKey(request, env) {
-  const provided = env.API_KEY || "cline2api-default-key";
+  const provided = env.API_KEY;
+  // 未配置 API_KEY → 使用内置默认 key
+  const expected = provided !== undefined && provided !== null && provided !== "" ? provided : "cline2api-default-key";
+
   const auth = request.headers.get("Authorization") || "";
   if (auth.startsWith("Bearer ")) {
-    return auth.slice(7) === provided ? provided : null;
+    return auth.slice(7) === expected ? expected : null;
   }
   const xKey = request.headers.get("x-api-key");
-  return xKey === provided ? provided : null;
+  return xKey === expected ? expected : null;
 }
 
 function jsonResponse(obj, status) {
