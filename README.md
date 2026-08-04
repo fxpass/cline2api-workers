@@ -42,49 +42,84 @@ python3 cline_oauth.py
 
 ## 二、部署到 Cloudflare Workers
 
+> ⚠️ **推荐方式：复制代码粘贴部署，不要用 Git 关联仓库部署。**
+> 实测 GitHub 关联 CF 部署（Git 集成）容易因入口文件/构建环境问题导致部署失败，
+> 且改环境变量后不会自动生效。用下方「复制代码」方式最稳、最快。
+
 ### 需要的东西
 
 - 一个 Cloudflare 账号（免费注册：[dash.cloudflare.com](https://dash.cloudflare.com)）
 - 上一步拿到的 `CLINE_REFRESH_TOKEN`
 
-### 部署步骤（DASHBOARD 图形界面版，无需命令行）
+### 部署步骤（复制代码版，推荐 ✅）
 
-1. 登录 [dash.cloudflare.com](https://dash.cloudflare.com) → **Workers & Pages** → **创建** → **创建 Worker**
-2. 名字填 `cline2api`（可自定义）→ **部署**
-3. 进入 Worker → **编辑代码** → 把本仓库 `worker.js` 的**全部内容**粘贴进去（覆盖默认代码）→ **部署**
-4. **配置机密变量**：
-   - Worker → **设置** → **变量和机密** → 添加：
-     - **机密**：`CLINE_REFRESH_TOKEN` = 第一步拿到的 refreshToken（⚠️ 必填，值保密）
-     - **文本**：`API_KEY` = 给客户端访问用的密钥，例如 `my-secret-key-123`（可选，不设则用内置默认）
-5. 完成！你的 API Base URL 就是 `https://cline2api.<你的子域>.workers.dev`
+1. 打开本仓库 `worker.js`，**全选复制全部代码**
+2. 登录 [dash.cloudflare.com](https://dash.cloudflare.com) → **Workers & Pages** → **创建** → **创建 Worker**
+3. 名字填 `cline2api`（可自定义）→ **部署**
+4. 进入 Worker → **编辑代码** → 删除默认代码，**粘贴**刚才复制的 `worker.js` 全部内容 → **部署**（右上角）
+5. **配置环境变量**（重点 ⚠️）：
+   - Worker → **设置** → **变量和机密** → **添加**：
+     - **机密(Secret)**：`CLINE_REFRESH_TOKEN` = 第一步拿到的 refreshToken（必填）
+     - **机密(Secret)**：`API_KEY` = 你的访问密钥，例如 `sk-cline-xxx`（建议必填，可自定义）
+   - ⚠️ **保存后必须再点一次「部署」触发重新编译**，变量才会生效！
+6. 完成！你的 API Base URL 就是 `https://cline2api.<你的子域>.workers.dev`
 
-### 命令行版（wrangler，可选）
+> 💡 验证环境变量是否生效，访问诊断端点：
+> ```bash
+> curl https://cline2api.<你的子域>.workers.dev/v1/health
+> ```
+> 返回 `api_key_configured: true` 即表示变量已生效。
 
-```bash
-npm install -g wrangler
-wrangler login                      # 浏览器登录你的 Cloudflare
-wrangler deploy                     # 部署 worker.js
-echo "你的refreshToken" | wrangler secret put CLINE_REFRESH_TOKEN   # 设置机密
-```
+### 需要的东西&环境变量说明
+
+| 变量名 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `CLINE_REFRESH_TOKEN` | 机密 Secret | ✅ | Cline 账号 refreshToken |
+| `API_KEY` | 机密 Secret | 建议 | 客户端访问密钥；不设则用默认 `cline2api-default-key` |
+
+> 变量名必须**完全一致**（全大写、无空格）。修改后**务必保存并重新部署**才会生效。
 
 ### 验证部署
 
 ```bash
 curl https://cline2api.<你的子域>.workers.dev/v1/models \
-  -H "Authorization: Bearer my-secret-key-123"
+  -H "Authorization: Bearer <你的API_KEY>"
 ```
 应返回模型列表。再发一次聊天：
 
 ```bash
 curl https://cline2api.<你的子域>.workers.dev/v1/chat/completions \
-  -H "Authorization: Bearer my-secret-key-123" \
+  -H "Authorization: Bearer <你的API_KEY>" \
   -H "Content-Type: application/json" \
   -d '{"model":"deepseek/deepseek-v4-flash","messages":[{"role":"user","content":"你好"}]}'
 ```
 
 ---
 
-## 三、使用
+## 三、在 AgentScope 平台调用（模型接入）
+
+把该 Worker 当作 OpenAI 兼容 API 接入 **AgentScope（QwenPaw / qwenpaw.agentscope.io）** 时：
+
+### ⚠️ 关键：直接用 Workers 域名，不要用自定义域名
+
+- **用 `https://cline2api.<你的子域>.workers.dev/v1`** 作为模型 **Base URL / API Base**。
+- **不要用绑定的自定义域名**（如 `api.llm.xxx.com`）：AgentScope 平台对接时，
+  自定义域名可能因证书/路由/鉴权头处理问题导致调用失败或鉴权不过，
+  直接用 Workers 官方域名最稳。
+
+### AgentScope 里怎么配（OpenAI 兼容模式）
+
+- **API Base / Base URL**：`https://cline2api.<你的子域>.workers.dev/v1`
+  （部分平台要求不带 `/v1` 的填写为 `https://cline2api.<你的子域>.workers.dev`，按平台提示试）
+- **API Key**：填你设置的 `API_KEY` 值（如 `sk-cline-xxx`）
+- **Model**：`deepseek/deepseek-v4-flash`（或其他可用模型）
+
+> 若 AgentScope 平台走的标准 OpenAI SDK，直接指定上述 base_url + api_key 即可。
+> 若测试报 401，请确认 `API_KEY` 变量已在 CF 配置并重新部署过。
+
+---
+
+## 四、使用
 
 ```text
 Base URL: https://cline2api.<你的子域>.workers.dev/v1
@@ -107,18 +142,18 @@ Model:    deepseek/deepseek-v4-flash   （默认）
 
 ---
 
-## 四、项目结构
+## 五、项目结构
 
 ```
 .
 ├── worker.js          # 主 Worker 代码（部署核心）
 ├── cline_oauth.py     # 获取 CLINE_REFRESH_TOKEN 的脚本 ⭐
-├── wrangler.toml      # wrangler 配置（命令行部署用）
+├── wrangler.toml      # (可选) wrangler 命令行部署配置，用复制代码方式可忽略
 ├── test_request.json  # 测试请求示例
 └── README.md          # 本文件
 ```
 
-## 五、获取 refreshToken 常见问题
+## 六、获取 refreshToken 常见问题
 
 **Q: 谁能看到我的 refreshToken？**
 → 只有你。它存在 CF Workers 的**机密变量**里（加密存储，代码里看不到、日志里不显示）。不要把 `wrangler.toml` 里的变量跟真实 refreshToken 混写，机密务必用 `wrangler secret` 或 Dashboard 的"机密"类型。
