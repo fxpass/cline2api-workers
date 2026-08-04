@@ -60,6 +60,7 @@ python3 cline_oauth.py
 5. **配置环境变量**（重点 ⚠️）：
    - Worker → **设置** → **变量和机密** → **添加**：
      - **机密(Secret)**：`CLINE_REFRESH_TOKEN` = 第一步拿到的 refreshToken（必填）
+       - **支持多账号**：一行一个 token，见下文「多账号」章节
      - **机密(Secret)**：`API_KEY` = 你的访问密钥，例如 `sk-cline-xxx`（建议必填，可自定义）
    - ⚠️ **保存后必须再点一次「部署」触发重新编译**，变量才会生效！
 6. 完成！你的 API Base URL 就是 `https://cline2api.<你的子域>.workers.dev`
@@ -68,16 +69,35 @@ python3 cline_oauth.py
 > ```bash
 > curl https://cline2api.<你的子域>.workers.dev/v1/health
 > ```
-> 返回 `api_key_configured: true` 即表示变量已生效。
+> 返回 `api_key_configured: true` 即表示变量已生效，`account_count` 显示已配置的账号数量。
 
 ### 需要的东西&环境变量说明
 
 | 变量名 | 类型 | 必填 | 说明 |
 |---|---|---|---|
-| `CLINE_REFRESH_TOKEN` | 机密 Secret | ✅ | Cline 账号 refreshToken |
+| `CLINE_REFRESH_TOKEN` | 机密 Secret | ✅ | Cline 账号 refreshToken，**一行一个，支持多账号** |
 | `API_KEY` | 机密 Secret | 建议 | 客户端访问密钥；不设则用默认 `cline2api-default-key` |
 
 > 变量名必须**完全一致**（全大写、无空格）。修改后**务必保存并重新部署**才会生效。
+
+### 🔁 多账号（额度用完自动切号）⭐
+
+一个账号的免费额度/限流用完时，想切下一个号？不用改任何东西，**在 `CLINE_REFRESH_TOKEN` 里一行填一个 token 即可**：
+
+```
+第一个账号的refreshToken
+第二个账号的refreshToken
+第三个账号的refreshToken
+```
+
+**工作机制：**
+- 🔄 **账号池轮询**：请求轮流使用不同账号（round-robin），分散单账号压力
+- ⚡ **额度用完自动切号**：某账号触发空响应（额度用完/限流），**自动冷却该账号 60 秒并切到下一个**，同一请求换号重试
+- 🚫 **失效自动跳过**：刷新失败的账号会被跳过，不阻塞
+- ✅ **独立缓存**：每个账号各自的 accessToken 独立缓存，互不影响
+- 单账号时完全兼容，原样工作
+
+**验证：** 部署后访问 `/v1/health`，返回 `account_count` 即当前账号数量。
 
 ### 验证部署
 
