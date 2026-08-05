@@ -2,7 +2,9 @@
 
 把 Cline（https://cline.bot）的白嫖模型能力转成 OpenAI 兼容 API，部署在 Cloudflare Workers 上，免费、无服务器、无需本地运行。
 
-> 逆向自 https://github.com/luawei1/cline2api（Go 版代理），重写为纯 JS 的 Worker。
+> 逆向自 https://github.com/luawei1/cline2api
+>
+> （Go 版代理），重写为纯 JS 的 Worker。
 
 ---
 
