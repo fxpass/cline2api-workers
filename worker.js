@@ -269,59 +269,79 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-// 带重试的 clineFetch：空响应/5xx 自动切换账号 + 指数退避重试
-// 空响应(额度用完)会冷却当前账号，下次自动轮换到下一个号
-// isStream=true 时跳过 body 空响应检测（SSE 流不能整体 read，交给调用方处理）
+// 解析上游 429/限流响应里的等待时间，返回毫秒
+// 支持格式: "Try again in 2h 51m" / "Try again in 30m" / "Try again in 1h" / "Try again in 15s"
+function parseCooldown(body, status) {
+  const m = (body || "").match(/try again in (?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?\s*(?:(\d+)\s*s)?/i);
+  if (m) {
+    const h = parseInt(m[1] || 0, 10);
+    const min = parseInt(m[2] || 0, 10);
+    const s = parseInt(m[3] || 0, 10);
+    const ms = (h * 3600 + min * 60 + s) * 1000;
+    if (ms > 0) return Math.min(ms, 6 * 3600 * 1000); // 上限 6 小时
+  }
+  // 429 默认 5 分钟；空响应默认 60 秒
+  if (status === 429) return 5 * 60 * 1000;
+  return 60 * 1000;
+}
+
+// 带重试的 clineFetch：429限流/空响应/5xx 自动切换账号 + 指数退避重试
+// 一个号额度用完或限流(429 Daily free limit reached)时：
+//   - 冷却该账号（冷却时长按上游提示，如 2h51m）
+//   - 自动轮换到下一个号重试同一请求
+// 所有账号都冷却时，直接返回原始响应（不空转）
 async function clineFetchWithRetry(env, path, bodyObj, sessionId, isStream = false, maxRetries = 4) {
+  let lastResp = null;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     // 通过队列串行执行，避免并发空响应
     const resp = await enqueue(() => clineFetch(env, path, bodyObj, sessionId));
-    let hitEmpty = false;
+    lastResp = resp;
 
-    if (resp.ok && !isStream) {
-      // 非流式：额外检测上游 200 但 body 是空响应包装
-      const text = await resp.clone().text();
-      if (!text.includes("empty response content")) {
-        return resp;
-      }
-      hitEmpty = true;
-      console.log(`[retry] empty response content (attempt ${attempt + 1}/${maxRetries})`);
-    } else if (isStream) {
-      // 流式：只要 HTTP 200 就直接转发，空流/错误由流式处理器判断
-      return resp;
-    } else if (resp.status !== 500 && resp.status !== 502 && resp.status !== 503 && resp.status !== 504) {
-      // 非 5xx 错误（如 403/400）不重试，直接返回
-      return resp;
-    } else {
-      const errText = await resp.clone().text();
-      if (!errText.includes("empty response content")) {
-        return resp; // 其他 5xx，不盲目重试
-      }
-      hitEmpty = true;
-      console.log(`[retry] 5xx empty (attempt ${attempt + 1}/${maxRetries})`);
-    }
+    // 统一读 body（clone 不消耗流）
+    let bodyText = "";
+    try {
+      bodyText = await resp.clone().text();
+    } catch (e) {}
 
-    if (hitEmpty) {
-      // 额度用完：冷却当前账号，下一轮自动切到下个号
+    // 判定"额度/限流"信号（需要切号）：
+    // 1. 429（Daily free limit reached / rate limit）
+    // 2. 5xx 且含 empty response content
+    // 3. 200 非流式但 body 是空响应包装
+    const isLimitHit =
+      resp.status === 429 ||
+      (resp.status >= 500 && bodyText.includes("empty response content")) ||
+      (resp.ok && !isStream && bodyText.includes("empty response content"));
+
+    if (isLimitHit) {
+      const cooldownMs = parseCooldown(bodyText, resp.status);
       if (currentAccount) {
-        currentAccount.cooldownUntil = Date.now() + 60 * 1000;
+        currentAccount.cooldownUntil = Date.now() + cooldownMs;
         currentAccount.accessToken = null;
         currentAccount.expiry = 0;
-        console.log(`[account-switch] 账号额度用完，标记冷却，切换到下一个`);
+        console.log(`[account-switch] 账号额度/限流，冷却 ${Math.round(cooldownMs / 1000)}s，切换到下一个`);
       }
-      // 切号后短退避，避免全部同时冷却
-      const short = 500 + Math.floor(Math.random() * 500);
-      await sleep(short);
+      // 还有可用账号 → 短退避后重试（会切到下一个号）
+      const pool = parseAccounts(env);
+      const hasOther = pool.some((a) => !a.cooldownUntil || a.cooldownUntil <= Date.now());
+      if (!hasOther) {
+        console.log(`[retry] 所有账号均冷却，直接返回上游响应`);
+        return resp; // 不空转，把 429/错误返回给客户端
+      }
+      await sleep(500 + Math.floor(Math.random() * 500));
       continue;
     }
 
-    // 指数退避：约 1.5s, 3s, 6s, 12s（免费通道拥挤时空响应可持续数秒）
-    const backoff = Math.min(1500 * Math.pow(2, attempt), 12000);
-    console.log(`[retry] waiting ${backoff}ms...`);
-    await sleep(backoff);
+    // 正常响应（200）
+    if (resp.ok) {
+      if (isStream) return resp; // 流式：直接转发
+      return resp;               // 非流式：body 已确认非空响应
+    }
+
+    // 其他错误（403/400/401 等）不重试，直接返回
+    return resp;
   }
-  // 全部重试失败，返回最后一次响应
-  return enqueue(() => clineFetch(env, path, bodyObj, sessionId));
+  // 重试次数用完，返回最后一次响应
+  return lastResp;
 }
 
 // ---------------------------------------------------------------------------
