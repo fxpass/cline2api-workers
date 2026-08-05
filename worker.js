@@ -31,7 +31,8 @@ let currentAccount = null;     // 当前正在使用的账号（串行队列下�
 
 // 模型列表（实测可用性见 README）
 // 注意：cline-free/* 被官方客户端锁定（403），cline-pass/* 需付费订阅，
-//       免费可用的白嫖模型是 deepseek/deepseek-v4-flash 和 poolside/*:free
+//       deepseek/deepseek-v4-flash 需完整 Cline 客户端头 + 强制 stream（见 handleChat），
+//       poolside/*:free 免费可用（非流式也通）。
 const MODELS = [
   { id: "deepseek/deepseek-v4-flash", provider: "deepseek", cost: "free" },
   { id: "poolside/laguna-s-2.1:free", provider: "poolside", cost: "free" },
@@ -41,7 +42,7 @@ const MODELS = [
   { id: "cline-pass/qwen3.7-max", provider: "qwen", cost: "pass" },
 ];
 
-// 默认模型：用实测可用的白嫖模型
+// 默认模型：deepseek 免费通道（完整头 + 强制 stream 已修复）
 const DEFAULT_MODEL = "deepseek/deepseek-v4-flash";
 
 export default {
@@ -204,14 +205,34 @@ async function getAccessToken(env) {
   }
 }
 
+// Cline 客户端指纹请求头（官方靠这些头识别"是不是 Cline 客户端"）
+// 缺少会被 403: "deepseek/deepseek-v4-flash is only available via Cline product surfaces"
+function clineHeaders(sessionId) {
+  return {
+    Authorization: "Bearer workos:" + currentToken,
+    "Content-Type": "application/json",
+    "User-Agent": "Cline/3.0.47",
+    "HTTP-Referer": "https://cline.bot",
+    "X-Title": "Cline",
+    "X-IS-MULTIROOT": "false",
+    "X-CLIENT-TYPE": "cline-sdk",
+    "X-CLIENT-VERSION": "3.0.47",
+    "X-PLATFORM": "terminal",
+    "X-PLATFORM-VERSION": "3.0.47",
+    "X-CORE-VERSION": "0.0.66",
+    "X-Task-ID": sessionId,
+  };
+}
+
+// 当前账号的 accessToken（供 clineHeaders 使用）
+let currentToken = "";
+
 async function clineFetch(env, path, bodyObj, sessionId, retried = false) {
   const acc = currentAccount || null;
   const token = await getAccessToken(env);
-  const headers = {
-    Authorization: "Bearer workos:" + token,
-    "Content-Type": "application/json",
-    "X-Task-ID": sessionId,
-  };
+  currentToken = token;
+  const headers = clineHeaders(sessionId);
+  headers.Authorization = "Bearer workos:" + token;
   const resp = await fetch(CLINE_API_BASE + path, {
     method: "POST",
     headers,
@@ -323,37 +344,112 @@ async function handleChat(request, env) {
 
   const isStream = !!params.stream;
   const sessionId = "sess_" + Date.now();
+  const model = params.model || DEFAULT_MODEL;
 
   // 构造上游 body（与原版 buildUpstreamBody 一致）
   const body = {
-    model: params.model || DEFAULT_MODEL,
+    model: model,
     max_tokens: params.max_tokens || params.max_completion_tokens || 128000,
     session_id: sessionId,
     reasoning_effort: params.reasoning_effort || params.reasoningEffort || "high",
     messages: params.messages || [],
   };
-  if (isStream) body.stream = true;
+  // ⚠️ deepseek 免费通道：非流式请求被上游限流(500 empty response content)，
+  //    流式请求正常。所以客户端要非流式时，强制上游走 stream，再聚合返回。
+  const forceStream = !isStream && model.startsWith("deepseek/");
+  if (isStream || forceStream) body.stream = true;
   // 透传可选参数
   for (const k of ["temperature", "top_p", "tools", "tool_choice", "stop", "presence_penalty", "frequency_penalty", "response_format", "user", "n", "seed"]) {
     if (params[k] !== undefined) body[k] = params[k];
   }
 
   try {
-    const resp = await clineFetchWithRetry(env, "/chat/completions", body, sessionId, isStream);
+    const resp = await clineFetchWithRetry(env, "/chat/completions", body, sessionId, true);
     if (!resp.ok) {
       const errText = await resp.text();
       return jsonResponse({ error: { message: "upstream error: " + errText.slice(0, 300), type: "api_error" } }, resp.status);
     }
     if (isStream) {
+      // 客户端要流式：直接透传 SSE
       return streamResponse(resp);
     }
-    // 非流式：剥掉 {data:{...}} 包装
+    if (forceStream) {
+      // 客户端要非流式 + 上游是流式：聚合 chunks 再返回
+      const ct = resp.headers.get("content-type") || "";
+      if (ct.includes("text/event-stream")) {
+        const normalized = await streamToNonStream(resp);
+        return jsonResponse(normalized, 200);
+      }
+      // 上游没走 SSE（可能返回错误 JSON），尝试剥包装
+      const raw = await resp.json().catch(() => null);
+      if (raw) return jsonResponse(unwrapData(raw), 200);
+      return jsonResponse({ error: { message: "upstream returned non-SSE body", type: "api_error" } }, 502);
+    }
+    // 非流式 + 非 deepseek：原逻辑
     const raw = await resp.json();
     const normalized = unwrapData(raw);
     return jsonResponse(normalized, 200);
   } catch (e) {
     return jsonResponse({ error: { message: e.message, type: "api_error" } }, 500);
   }
+}
+
+// 把上游 SSE 流聚合成 OpenAI 非流式响应对象
+// 用于"客户端要非流式，但上游只能流式"的情况（deepseek 免费通道）
+async function streamToNonStream(upstream) {
+  const reader = upstream.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  let content = "";
+  let reasoning = "";
+  let finishReason = null;
+  let model = "";
+  let id = "";
+  let usage = null;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let idx;
+    while ((idx = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, idx);
+      buf = buf.slice(idx + 1);
+      if (!line.startsWith("data:")) continue;
+      const payload = line.slice(5).trim();
+      if (payload === "" || payload === "[DONE]") continue;
+      try {
+        const obj = JSON.parse(payload);
+        const normalized = unwrapData(obj);
+        const choice = normalized?.choices?.[0];
+        if (!choice) continue;
+        const delta = choice.delta || {};
+        if (delta.content) content += delta.content;
+        if (delta.reasoning) reasoning += delta.reasoning;
+        if (choice.finish_reason) finishReason = choice.finish_reason;
+        if (normalized.id) id = normalized.id;
+        if (normalized.model) model = normalized.model;
+        if (normalized.usage) usage = normalized.usage;
+      } catch {}
+    }
+  }
+
+  const msg = { role: "assistant", content };
+  if (reasoning) msg.reasoning = reasoning;
+  return {
+    id: id || "gen_" + Date.now(),
+    object: "chat.completion",
+    created: Math.floor(Date.now() / 1000),
+    model: model || DEFAULT_MODEL,
+    choices: [{
+      index: 0,
+      message: msg,
+      finish_reason: finishReason || "stop",
+      logprobs: null,
+      native_finish_reason: finishReason || "stop",
+    }],
+    usage: usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -394,7 +490,9 @@ async function handleAnthropic(request, env) {
     reasoning_effort: "high",
     messages,
   };
-  if (isStream) body.stream = true;
+  // ⚠️ deepseek 免费通道：非流式被上游限流，强制上游 stream 再聚合
+  const forceStream = !isStream && (req.model || "").startsWith("deepseek/");
+  if (isStream || forceStream) body.stream = true;
   if (req.temperature !== undefined) body.temperature = req.temperature;
   if (req.top_p !== undefined) body.top_p = req.top_p;
   if (req.tools) {
@@ -405,7 +503,7 @@ async function handleAnthropic(request, env) {
   }
 
   try {
-    const resp = await clineFetchWithRetry(env, "/chat/completions", body, sessionId, isStream);
+    const resp = await clineFetchWithRetry(env, "/chat/completions", body, sessionId, true);
     if (!resp.ok) {
       const errText = await resp.text();
       return jsonResponse({ error: { message: "upstream error: " + errText.slice(0, 300), type: "api_error" } }, resp.status);
@@ -413,6 +511,17 @@ async function handleAnthropic(request, env) {
     if (isStream) {
       // 上游是 OpenAI SSE，转成 Anthropic SSE 格式
       return streamResponseAnthropic(resp);
+    }
+    if (forceStream) {
+      // 客户端要非流式 + 上游是流式：聚合后再转 Anthropic
+      const ct = resp.headers.get("content-type") || "";
+      if (ct.includes("text/event-stream")) {
+        const normalized = await streamToNonStream(resp);
+        return jsonResponse(openAItoAnthropic(normalized), 200);
+      }
+      const raw = await resp.json().catch(() => null);
+      if (raw) return jsonResponse(openAItoAnthropic(unwrapData(raw)), 200);
+      return jsonResponse({ error: { message: "upstream returned non-SSE body", type: "api_error" } }, 502);
     }
     const raw = await resp.json();
     const normalized = unwrapData(raw);

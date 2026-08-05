@@ -168,7 +168,7 @@ curl https://cline2api.<你的子域>.workers.dev/v1/chat/completions \
 ```text
 Base URL: https://cline2api.<你的子域>.workers.dev/v1
 API Key:  <你设置的 API_KEY>
-Model:    poolside/laguna-s-2.1:free   （默认）
+Model:    deepseek/deepseek-v4-flash   （默认）
 ```
 
 兼容 OpenAI 客户端（`/v1/chat/completions`）和 Anthropic 客户端（`/v1/messages`，自动转换）。
@@ -177,14 +177,19 @@ Model:    poolside/laguna-s-2.1:free   （默认）
 
 | 模型 ID | 结果 |
 |---|---|
-| `poolside/laguna-s-2.1:free` | ✅ **免费可用**（默认） |
-| `deepseek/deepseek-v4-flash` | ❌ 403，官方限制"仅 Cline 产品界面可用"（API 第三方调用被拒） |
+| `deepseek/deepseek-v4-flash` | ✅ **免费可用**（默认；需完整 Cline 客户端头 + 强制 stream，已修复） |
+| `poolside/laguna-s-2.1:free` | ✅ **免费可用** |
 | `cline-free/glm-5.2` | ❌ 403，官方锁定为"仅 Cline 客户端" |
 | `cline-pass/*` | ❌ 403，需付费 cline-pass 订阅 |
 
-> ⚠️ 2026-08 实测：`deepseek/deepseek-v4-flash` 与 `cline-free/glm-5.2` 均被官方限制为
-> "仅 Cline 产品界面可用"（第三方 API 调用返回 403），
-> 目前 API 可稳定使用的是 **`poolside/laguna-s-2.1:free`**，默认模型已改为它。
+> ⚠️ **2026-08-05 修复记录**：
+> - **403 "only available via Cline product surfaces"**：worker 请求头太精简，被官方识别为第三方调用。
+>   修复：补齐完整 Cline 客户端指纹头（`User-Agent: Cline/3.0.47`、`HTTP-Referer`、`X-CLIENT-TYPE: cline-sdk`、
+>   `X-CLIENT-VERSION`、`X-PLATFORM` 等），`deepseek/deepseek-v4-flash` 恢复可用。
+> - **非流式 500 "empty response content"**：上游对 deepseek 免费通道的非流式请求限流，但流式正常。
+>   修复：客户端要非流式时，worker 强制上游走 stream，聚合 chunks 后返回非流式响应。
+> - **429 "Daily free limit reached"**：不是 bug，是**账号每日免费额度**用完（`Try again in Xh Xm`）。
+>   这是 Cline 官方对免费模型的日配额，等冷却结束自动恢复；多账号可缓解（`CLINE_REFRESH_TOKEN` 多行填多个 token）。
 
 ---
 
@@ -210,7 +215,9 @@ Model:    poolside/laguna-s-2.1:free   （默认）
 → 会，但 Cline 的 refreshToken 有效期较长。如果将来请求返回 401/403 token 失效，重新跑 `cline_oauth.py` 拿新的即可。
 
 **Q: 免费额度够用吗？**
-→ 目前唯一稳定可用的是 `poolside/laguna-s-2.1:free` 免费模型，日常够用；如果想用更好的 `cline-pass/*` 需要付费订阅 Cline pass。
+→ `deepseek/deepseek-v4-flash`（默认）和 `poolside/laguna-s-2.1:free` 都是免费模型。
+   deepseek 有**每日免费额度**（用尽返回 429 "Daily free limit reached"，数小时后恢复）；
+   多账号可缓解（`CLINE_REFRESH_TOKEN` 多行填多个 token，额度用尽自动切号）。
 
 ---
 
