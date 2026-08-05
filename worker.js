@@ -395,15 +395,11 @@ async function handleChat(request, env) {
     }
     if (forceStream) {
       // 客户端要非流式 + 上游是流式：聚合 chunks 再返回
-      const ct = resp.headers.get("content-type") || "";
-      if (ct.includes("text/event-stream")) {
-        const normalized = await streamToNonStream(resp);
-        return jsonResponse(normalized, 200);
-      }
-      // 上游没走 SSE（可能返回错误 JSON），尝试剥包装
-      const raw = await resp.json().catch(() => null);
-      if (raw) return jsonResponse(unwrapData(raw), 200);
-      return jsonResponse({ error: { message: "upstream returned non-SSE body", type: "api_error" } }, 502);
+      // ⚠️ 免费通道(deepseek/cline-free)会概率性返回「HTTP200但content全程为空」的流
+      //    （100个chunk全是reasoning，无正式content）。这里做内容检测：空则切号重试。
+      const retried = await nonStreamWithContentCheck(env, "/chat/completions", body, sessionId);
+      if (retried.error) return retried.error;
+      return jsonResponse(retried.data, 200);
     }
     // 非流式 + 非 deepseek：原逻辑
     const raw = await resp.json();
@@ -416,6 +412,52 @@ async function handleChat(request, env) {
 
 // 把上游 SSE 流聚合成 OpenAI 非流式响应对象
 // 用于"客户端要非流式，但上游只能流式"的情况（deepseek 免费通道）
+// 额外处理：上游 200 但 content 全空（只有 reasoning）→ 视为坏响应，切号重试
+async function nonStreamWithContentCheck(env, path, bodyObj, sessionId) {
+  const maxAttempts = 3; // 最多试 3 次（覆盖多账号切换）
+  let lastData = null;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const resp = await clineFetchWithRetry(env, path, bodyObj, sessionId, true);
+    if (!resp.ok) {
+      const errText = await resp.text().catch(() => "");
+      return { error: jsonResponse({ error: { message: "upstream error: " + errText.slice(0, 300), type: "api_error" } }, resp.status) };
+    }
+    const ct = resp.headers.get("content-type") || "";
+    let normalized = null;
+    if (ct.includes("text/event-stream")) {
+      normalized = await streamToNonStream(resp);
+    } else {
+      const raw = await resp.json().catch(() => null);
+      if (raw) normalized = unwrapData(raw);
+    }
+    if (!normalized) {
+      return { error: jsonResponse({ error: { message: "upstream returned non-SSE body", type: "api_error" } }, 502) };
+    }
+    lastData = normalized;
+    const content = (normalized?.choices?.[0]?.message?.content || "").trim();
+    const reasoning = (normalized?.choices?.[0]?.message?.reasoning || "").trim();
+    if (content) {
+      return { data: normalized }; // 有正式 content → 好响应
+    }
+    // content 为空：如果只有 reasoning，标记当前账号冷却并重试
+    if (reasoning) {
+      if (currentAccount) {
+        currentAccount.cooldownUntil = Date.now() + 30 * 1000; // 短冷却 30s
+        currentAccount.accessToken = null;
+        currentAccount.expiry = 0;
+        console.log(`[empty-content] 账号 ${attempt} 返回空 content，冷却 30s，重试第 ${attempt + 2} 次`);
+      }
+      await sleep(300 + Math.floor(Math.random() * 300));
+      continue;
+    }
+    // 完全空（连 reasoning 都没有）→ 也重试
+    console.log(`[empty-response] 账号 ${attempt} 完全空响应，重试第 ${attempt + 2} 次`);
+    await sleep(300 + Math.floor(Math.random() * 300));
+  }
+  // 重试用完仍空：返回最后一次（至少带 reasoning，让客户端看到点东西）
+  return { data: lastData };
+}
+
 async function streamToNonStream(upstream) {
   const reader = upstream.body.getReader();
   const decoder = new TextDecoder();
@@ -740,3 +782,4 @@ function corsHeaders() {
     "Access-Control-Allow-Headers": "Content-Type, Authorization, x-api-key, anthropic-version, anthropic-beta",
   };
 }
+
