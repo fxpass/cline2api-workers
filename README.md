@@ -160,7 +160,7 @@ curl https://cline2api.<你的子域>.workers.dev/v1/chat/completions \
 - **API Base / Base URL**：`https://cline2api.<你的子域>.workers.dev/v1`
   （部分平台要求不带 `/v1` 的填写为 `https://cline2api.<你的子域>.workers.dev`，按平台提示试）
 - **API Key**：填你设置的 `API_KEY` 值（如 `sk-cline-xxx`）
-- **Model**：`deepseek/deepseek-v4-flash`（默认）或 `cline-free/glm-5.2`、`poolside/laguna-s-2.1:free`
+- **Model**：`deepseek/deepseek-v4-flash`（默认）或 `poolside/laguna-s-2.1:free`、`zai/glm-5.2`（付费，约 $0.0008/次）
 
 > 若 AgentScope 平台走的标准 OpenAI SDK，直接指定上述 base_url + api_key 即可。
 > 若测试报 401，请确认 `API_KEY` 变量已在 CF 配置并重新部署过。
@@ -183,9 +183,16 @@ Model:    deepseek/deepseek-v4-flash   （默认）
 |---|---|
 | `deepseek/deepseek-v4-flash` | ✅ **免费可用**（默认；需完整 Cline 客户端头 + 强制 stream，已修复） |
 | `poolside/laguna-s-2.1:free` | ✅ **免费可用** |
-| `cline-free/glm-5.2` | ✅ **免费可用**（需完整 Cline 客户端头 + 强制 stream，已修复） |
+| `zai/glm-5.2` | ✅ **可用（付费）**，走 Cline 系统凭证，约 $0.0008/次 |
+| `cline-free/glm-5.2` | ❌ **已下架**（上游 404 `model not found`，2026-08-06 实测） |
 | `cline-pass/*` | ❌ 403，需付费 cline-pass 订阅 |
 
+> ⚠️ **2026-08-06 更新**：
+> - **`cline-free/glm-5.2` 上游已下架**：该免费模型名在 Cline 上游返回 404 `model not found`（非请求头问题，
+>   与 deepseek 同款 Cline 指纹头仍返回 200）。同模型的付费通道 `zai/glm-5.2` 可用（约 $0.0008/次，
+>   走 Cline 系统凭证），`cline-pass/glm-5.2` 需订阅返回 403。
+> - 若你的 AgentScope 里还配着 `cline-free/glm-5.2`，请改配 `deepseek/deepseek-v4-flash`（免费）或 `zai/glm-5.2`（付费）。
+>
 > ⚠️ **2026-08-05 修复记录**：
 > - **403 "only available via Cline product surfaces"**：worker 请求头太精简，被官方识别为第三方调用。
 >   修复：补齐完整 Cline 客户端指纹头（`User-Agent: Cline/3.0.47`、`HTTP-Referer`、`X-CLIENT-TYPE: cline-sdk`、
@@ -221,9 +228,10 @@ Model:    deepseek/deepseek-v4-flash   （默认）
 → 会，但 Cline 的 refreshToken 有效期较长。如果将来请求返回 401/403 token 失效，重新跑 `cline_oauth.py` 拿新的即可。
 
 **Q: 免费额度够用吗？**
-→ `deepseek/deepseek-v4-flash`（默认）、`cline-free/glm-5.2` 和 `poolside/laguna-s-2.1:free` 都是免费模型。
-   deepseek 和 glm-5.2 有**每日免费额度**（用尽返回 429 "Daily free limit reached"，数小时后恢复）；
+→ `deepseek/deepseek-v4-flash`（默认）和 `poolside/laguna-s-2.1:free` 都是免费模型。
+   deepseek 有**每日免费额度**（用尽返回 429 "Daily free limit reached"，数小时后恢复）；
    多账号可缓解（`CLINE_REFRESH_TOKEN` 多行填多个 token，额度用尽自动切号）。
+   `zai/glm-5.2` 为付费模型（约 $0.0008/次），走 Cline 系统凭证，无每日额度限制。
 
 ---
 
