@@ -158,7 +158,7 @@ curl https://cline2api.<你的子域>.workers.dev/v1/chat/completions \
 - **API Base / Base URL**：`https://cline2api.<你的子域>.workers.dev/v1`
   （部分平台要求不带 `/v1` 的填写为 `https://cline2api.<你的子域>.workers.dev`，按平台提示试）
 - **API Key**：填你设置的 `API_KEY` 值（如 `sk-cline-xxx`）
-- **Model**：`poolside/laguna-s-2.1:free`（或其他可用模型）
+- **Model**：`deepseek/deepseek-v4-flash`（默认）或 `cline-free/glm-5.2`、`poolside/laguna-s-2.1:free`
 
 > 若 AgentScope 平台走的标准 OpenAI SDK，直接指定上述 base_url + api_key 即可。
 > 若测试报 401，请确认 `API_KEY` 变量已在 CF 配置并重新部署过。
@@ -219,8 +219,8 @@ Model:    deepseek/deepseek-v4-flash   （默认）
 → 会，但 Cline 的 refreshToken 有效期较长。如果将来请求返回 401/403 token 失效，重新跑 `cline_oauth.py` 拿新的即可。
 
 **Q: 免费额度够用吗？**
-→ `deepseek/deepseek-v4-flash`（默认）和 `poolside/laguna-s-2.1:free` 都是免费模型。
-   deepseek 有**每日免费额度**（用尽返回 429 "Daily free limit reached"，数小时后恢复）；
+→ `deepseek/deepseek-v4-flash`（默认）、`cline-free/glm-5.2` 和 `poolside/laguna-s-2.1:free` 都是免费模型。
+   deepseek 和 glm-5.2 有**每日免费额度**（用尽返回 429 "Daily free limit reached"，数小时后恢复）；
    多账号可缓解（`CLINE_REFRESH_TOKEN` 多行填多个 token，额度用尽自动切号）。
 
 ---
