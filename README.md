@@ -178,12 +178,13 @@ Model:    poolside/laguna-s-2.1:free   （默认）
 | 模型 ID | 结果 |
 |---|---|
 | `poolside/laguna-s-2.1:free` | ✅ **免费可用**（默认） |
-| `deepseek/deepseek-v4-flash` | ❌ 403，官方已禁（原免费通道被封） |
+| `deepseek/deepseek-v4-flash` | ❌ 403，官方限制"仅 Cline 产品界面可用"（API 第三方调用被拒） |
 | `cline-free/glm-5.2` | ❌ 403，官方锁定为"仅 Cline 客户端" |
 | `cline-pass/*` | ❌ 403，需付费 cline-pass 订阅 |
 
-> ⚠️ 2026-08 实测：`deepseek/deepseek-v4-flash` 与 `cline-free/glm-5.2` 均已被官方限制（403），
-> 目前唯一稳定可用的是 **`poolside/laguna-s-2.1:free`**，默认模型已改为它。
+> ⚠️ 2026-08 实测：`deepseek/deepseek-v4-flash` 与 `cline-free/glm-5.2` 均被官方限制为
+> "仅 Cline 产品界面可用"（第三方 API 调用返回 403），
+> 目前 API 可稳定使用的是 **`poolside/laguna-s-2.1:free`**，默认模型已改为它。
 
 ---
 
