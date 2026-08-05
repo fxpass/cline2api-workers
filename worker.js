@@ -397,7 +397,7 @@ async function handleChat(request, env) {
       // 客户端要非流式 + 上游是流式：聚合 chunks 再返回
       // ⚠️ 免费通道(deepseek/cline-free)会概率性返回「HTTP200但content全程为空」的流
       //    （100个chunk全是reasoning，无正式content）。这里做内容检测：空则切号重试。
-      const retried = await nonStreamWithContentCheck(env, "/chat/completions", body, sessionId);
+      const retried = await nonStreamWithContentCheck(env, "/chat/completions", body, sessionId, resp);
       if (retried.error) return retried.error;
       return jsonResponse(retried.data, 200);
     }
@@ -413,11 +413,16 @@ async function handleChat(request, env) {
 // 把上游 SSE 流聚合成 OpenAI 非流式响应对象
 // 用于"客户端要非流式，但上游只能流式"的情况（deepseek 免费通道）
 // 额外处理：上游 200 但 content 全空（只有 reasoning）→ 视为坏响应，切号重试
-async function nonStreamWithContentCheck(env, path, bodyObj, sessionId) {
+// 由调用方传入"已获取的上游响应"，这里负责聚合 + content 检测 + 空则重试。
+async function nonStreamWithContentCheck(env, path, bodyObj, sessionId, firstResp) {
   const maxAttempts = 3; // 最多试 3 次（覆盖多账号切换）
   let lastData = null;
+  let resp = firstResp;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const resp = await clineFetchWithRetry(env, path, bodyObj, sessionId, true);
+    if (!resp) {
+      // 需要重新发起上游请求（空响应重试时）
+      resp = await clineFetchWithRetry(env, path, bodyObj, sessionId, true);
+    }
     if (!resp.ok) {
       const errText = await resp.text().catch(() => "");
       return { error: jsonResponse({ error: { message: "upstream error: " + errText.slice(0, 300), type: "api_error" } }, resp.status) };
@@ -434,13 +439,17 @@ async function nonStreamWithContentCheck(env, path, bodyObj, sessionId) {
       return { error: jsonResponse({ error: { message: "upstream returned non-SSE body", type: "api_error" } }, 502) };
     }
     lastData = normalized;
-    const content = (normalized?.choices?.[0]?.message?.content || "").trim();
-    const reasoning = (normalized?.choices?.[0]?.message?.reasoning || "").trim();
-    if (content) {
+    const msg = normalized?.choices?.[0]?.message || {};
+    const content = (msg.content || "").trim();
+    const reasoning = (msg.reasoning || "").trim();
+    // ⚠️ reasoning 兜底标记：content 为空时 streamToNonStream 会把 reasoning 拼进 content，
+    //    这里要识别出来，不能把它当成"好响应"。
+    const isReasoningFallback = msg.reasoning_used_as_content === true;
+    if (content && !isReasoningFallback) {
       return { data: normalized }; // 有正式 content → 好响应
     }
-    // content 为空：如果只有 reasoning，标记当前账号冷却并重试
-    if (reasoning) {
+    // content 为空（或只有兜底 reasoning）：如果只有 reasoning，标记当前账号冷却并重试
+    if (reasoning || isReasoningFallback) {
       if (currentAccount) {
         currentAccount.cooldownUntil = Date.now() + 30 * 1000; // 短冷却 30s
         currentAccount.accessToken = null;
@@ -448,11 +457,13 @@ async function nonStreamWithContentCheck(env, path, bodyObj, sessionId) {
         console.log(`[empty-content] 账号 ${attempt} 返回空 content，冷却 30s，重试第 ${attempt + 2} 次`);
       }
       await sleep(300 + Math.floor(Math.random() * 300));
+      resp = null; // 下次循环重新请求（切到下一个号）
       continue;
     }
     // 完全空（连 reasoning 都没有）→ 也重试
     console.log(`[empty-response] 账号 ${attempt} 完全空响应，重试第 ${attempt + 2} 次`);
     await sleep(300 + Math.floor(Math.random() * 300));
+    resp = null;
   }
   // 重试用完仍空：返回最后一次（至少带 reasoning，让客户端看到点东西）
   return { data: lastData };
@@ -498,6 +509,13 @@ async function streamToNonStream(upstream) {
 
   const msg = { role: "assistant", content };
   if (reasoning) msg.reasoning = reasoning;
+  // ⚠️ 兜底：免费通道偶尔整个流只有 reasoning 没有 content（HTTP 200 但空）。
+  //    聚合后发现 content 仍为空且 reasoning 非空时，把 reasoning 拼进 content，
+  //    保证客户端（qwenpaw 等）至少能收到可见内容，不会"静默不回复"。
+  if (!content && reasoning) {
+    msg.content = reasoning;
+    msg.reasoning_used_as_content = true;
+  }
   return {
     id: id || "gen_" + Date.now(),
     object: "chat.completion",
@@ -576,14 +594,10 @@ async function handleAnthropic(request, env) {
     }
     if (forceStream) {
       // 客户端要非流式 + 上游是流式：聚合后再转 Anthropic
-      const ct = resp.headers.get("content-type") || "";
-      if (ct.includes("text/event-stream")) {
-        const normalized = await streamToNonStream(resp);
-        return jsonResponse(openAItoAnthropic(normalized), 200);
-      }
-      const raw = await resp.json().catch(() => null);
-      if (raw) return jsonResponse(openAItoAnthropic(unwrapData(raw)), 200);
-      return jsonResponse({ error: { message: "upstream returned non-SSE body", type: "api_error" } }, 502);
+      // ⚠️ 同样做 content 检测：免费通道会概率性返回"200但content全空"的流，空则切号重试
+      const retried = await nonStreamWithContentCheck(env, "/chat/completions", body, sessionId, resp);
+      if (retried.error) return retried.error;
+      return jsonResponse(openAItoAnthropic(retried.data), 200);
     }
     const raw = await resp.json();
     const normalized = unwrapData(raw);
