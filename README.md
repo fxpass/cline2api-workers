@@ -135,7 +135,7 @@ curl https://cline2api.<你的子域>.workers.dev/v1/models \
 curl https://cline2api.<你的子域>.workers.dev/v1/chat/completions \
   -H "Authorization: Bearer <你的API_KEY>" \
   -H "Content-Type: application/json" \
-  -d '{"model":"deepseek/deepseek-v4-flash","messages":[{"role":"user","content":"你好"}]}'
+  -d '{"model":"poolside/laguna-s-2.1:free","messages":[{"role":"user","content":"你好"}]}'
 ```
 
 ---
@@ -156,7 +156,7 @@ curl https://cline2api.<你的子域>.workers.dev/v1/chat/completions \
 - **API Base / Base URL**：`https://cline2api.<你的子域>.workers.dev/v1`
   （部分平台要求不带 `/v1` 的填写为 `https://cline2api.<你的子域>.workers.dev`，按平台提示试）
 - **API Key**：填你设置的 `API_KEY` 值（如 `sk-cline-xxx`）
-- **Model**：`deepseek/deepseek-v4-flash`（或其他可用模型）
+- **Model**：`poolside/laguna-s-2.1:free`（或其他可用模型）
 
 > 若 AgentScope 平台走的标准 OpenAI SDK，直接指定上述 base_url + api_key 即可。
 > 若测试报 401，请确认 `API_KEY` 变量已在 CF 配置并重新部署过。
@@ -168,7 +168,7 @@ curl https://cline2api.<你的子域>.workers.dev/v1/chat/completions \
 ```text
 Base URL: https://cline2api.<你的子域>.workers.dev/v1
 API Key:  <你设置的 API_KEY>
-Model:    deepseek/deepseek-v4-flash   （默认）
+Model:    poolside/laguna-s-2.1:free   （默认）
 ```
 
 兼容 OpenAI 客户端（`/v1/chat/completions`）和 Anthropic 客户端（`/v1/messages`，自动转换）。
@@ -177,12 +177,13 @@ Model:    deepseek/deepseek-v4-flash   （默认）
 
 | 模型 ID | 结果 |
 |---|---|
-| `deepseek/deepseek-v4-flash` | ✅ **免费可用**（默认） |
-| `poolside/laguna-s-2.1:free` | ✅ **免费可用** |
+| `poolside/laguna-s-2.1:free` | ✅ **免费可用**（默认） |
+| `deepseek/deepseek-v4-flash` | ❌ 403，官方已禁（原免费通道被封） |
 | `cline-free/glm-5.2` | ❌ 403，官方锁定为"仅 Cline 客户端" |
 | `cline-pass/*` | ❌ 403，需付费 cline-pass 订阅 |
 
-> ⚠️ `cline-free/glm-5.2` 目前被官方限制（2026-08 实测 403），所以默认模型用 `deepseek/deepseek-v4-flash`。
+> ⚠️ 2026-08 实测：`deepseek/deepseek-v4-flash` 与 `cline-free/glm-5.2` 均已被官方限制（403），
+> 目前唯一稳定可用的是 **`poolside/laguna-s-2.1:free`**，默认模型已改为它。
 
 ---
 
@@ -208,7 +209,7 @@ Model:    deepseek/deepseek-v4-flash   （默认）
 → 会，但 Cline 的 refreshToken 有效期较长。如果将来请求返回 401/403 token 失效，重新跑 `cline_oauth.py` 拿新的即可。
 
 **Q: 免费额度够用吗？**
-→ `deepseek/deepseek-v4-flash` 属于免费模型，日常够用；如果想用更好的 `cline-pass/*` 需要付费订阅 Cline pass。
+→ 目前唯一稳定可用的是 `poolside/laguna-s-2.1:free` 免费模型，日常够用；如果想用更好的 `cline-pass/*` 需要付费订阅 Cline pass。
 
 ---
 
