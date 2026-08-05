@@ -116,9 +116,11 @@ python3 cline_oauth.py
 
 **工作机制：**
 - 🔄 **账号池轮询**：请求轮流使用不同账号（round-robin），分散单账号压力
-- ⚡ **额度用完自动切号**：某账号触发空响应（额度用完/限流），**自动冷却该账号 60 秒并切到下一个**，同一请求换号重试
+- ⚡ **额度用完/限流自动切号**：某账号触发 429（`Daily free limit reached`）或空响应，
+  **解析上游冷却提示**（如 `Try again in 2h 51m`），按实际时长冷却该账号并切换到下一个，同一请求换号重试
 - 🚫 **失效自动跳过**：刷新失败的账号会被跳过，不阻塞
 - ✅ **独立缓存**：每个账号各自的 accessToken 独立缓存，互不影响
+- 🛡️ **全部冷却不空转**：所有账号均冷却时直接返回上游响应，不盲目重试
 - 单账号时完全兼容，原样工作
 
 **验证：** 部署后访问 `/v1/health`，返回 `account_count` 即当前账号数量。
@@ -179,17 +181,19 @@ Model:    deepseek/deepseek-v4-flash   （默认）
 |---|---|
 | `deepseek/deepseek-v4-flash` | ✅ **免费可用**（默认；需完整 Cline 客户端头 + 强制 stream，已修复） |
 | `poolside/laguna-s-2.1:free` | ✅ **免费可用** |
-| `cline-free/glm-5.2` | ❌ 403，官方锁定为"仅 Cline 客户端" |
+| `cline-free/glm-5.2` | ✅ **免费可用**（需完整 Cline 客户端头 + 强制 stream，已修复） |
 | `cline-pass/*` | ❌ 403，需付费 cline-pass 订阅 |
 
 > ⚠️ **2026-08-05 修复记录**：
 > - **403 "only available via Cline product surfaces"**：worker 请求头太精简，被官方识别为第三方调用。
 >   修复：补齐完整 Cline 客户端指纹头（`User-Agent: Cline/3.0.47`、`HTTP-Referer`、`X-CLIENT-TYPE: cline-sdk`、
->   `X-CLIENT-VERSION`、`X-PLATFORM` 等），`deepseek/deepseek-v4-flash` 恢复可用。
-> - **非流式 500 "empty response content"**：上游对 deepseek 免费通道的非流式请求限流，但流式正常。
+>   `X-CLIENT-VERSION`、`X-PLATFORM` 等），`deepseek/deepseek-v4-flash` 和 `cline-free/glm-5.2` 恢复可用。
+> - **非流式 500 "empty response content"**：上游对免费通道（deepseek + cline-free）的非流式请求限流，但流式正常。
 >   修复：客户端要非流式时，worker 强制上游走 stream，聚合 chunks 后返回非流式响应。
 > - **429 "Daily free limit reached"**：不是 bug，是**账号每日免费额度**用完（`Try again in Xh Xm`）。
 >   这是 Cline 官方对免费模型的日配额，等冷却结束自动恢复；多账号可缓解（`CLINE_REFRESH_TOKEN` 多行填多个 token）。
+> - **多账号 429 自动切号**：429 限流时自动解析上游冷却时长（如 `Try again in 2h 51m`），
+>   冷却该账号并切换到下一个可用账号重试同一请求；所有账号均冷却时直接返回上游响应，不空转。
 
 ---
 

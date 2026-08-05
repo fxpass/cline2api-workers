@@ -30,13 +30,13 @@ let accountIndex = 0;          // round-robin 游标
 let currentAccount = null;     // 当前正在使用的账号（串行队列下安全）
 
 // 模型列表（实测可用性见 README）
-// 注意：cline-free/* 被官方客户端锁定（403），cline-pass/* 需付费订阅，
-//       deepseek/deepseek-v4-flash 需完整 Cline 客户端头 + 强制 stream（见 handleChat），
+// 注意：cline-pass/* 需付费订阅，
+//       deepseek/deepseek-v4-flash 和 cline-free/glm-5.2 需完整 Cline 客户端头 + 强制 stream（见 handleChat），
 //       poolside/*:free 免费可用（非流式也通）。
 const MODELS = [
   { id: "deepseek/deepseek-v4-flash", provider: "deepseek", cost: "free" },
   { id: "poolside/laguna-s-2.1:free", provider: "poolside", cost: "free" },
-  { id: "cline-free/glm-5.2", provider: "zai", cost: "locked" },
+  { id: "cline-free/glm-5.2", provider: "zai", cost: "free" },
   { id: "cline-pass/glm-5.2", provider: "zai", cost: "pass" },
   { id: "cline-pass/deepseek-v4-flash", provider: "deepseek", cost: "pass" },
   { id: "cline-pass/qwen3.7-max", provider: "qwen", cost: "pass" },
@@ -374,9 +374,9 @@ async function handleChat(request, env) {
     reasoning_effort: params.reasoning_effort || params.reasoningEffort || "high",
     messages: params.messages || [],
   };
-  // ⚠️ deepseek 免费通道：非流式请求被上游限流(500 empty response content)，
+  // ⚠️ 免费通道（deepseek + cline-free）：非流式请求被上游限流(500 empty response content)，
   //    流式请求正常。所以客户端要非流式时，强制上游走 stream，再聚合返回。
-  const forceStream = !isStream && model.startsWith("deepseek/");
+  const forceStream = !isStream && (model.startsWith("deepseek/") || model.startsWith("cline-free/"));
   if (isStream || forceStream) body.stream = true;
   // 透传可选参数
   for (const k of ["temperature", "top_p", "tools", "tool_choice", "stop", "presence_penalty", "frequency_penalty", "response_format", "user", "n", "seed"]) {
@@ -510,8 +510,8 @@ async function handleAnthropic(request, env) {
     reasoning_effort: "high",
     messages,
   };
-  // ⚠️ deepseek 免费通道：非流式被上游限流，强制上游 stream 再聚合
-  const forceStream = !isStream && (req.model || "").startsWith("deepseek/");
+  // ⚠️ 免费通道（deepseek + cline-free）：非流式被上游限流，强制上游 stream 再聚合
+  const forceStream = !isStream && ((req.model || "").startsWith("deepseek/") || (req.model || "").startsWith("cline-free/"));
   if (isStream || forceStream) body.stream = true;
   if (req.temperature !== undefined) body.temperature = req.temperature;
   if (req.top_p !== undefined) body.top_p = req.top_p;
