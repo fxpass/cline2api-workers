@@ -1,7 +1,0 @@
-{
-  "model": "cline-free/glm-5.2",
-  "messages": [
-    { "role": "user", "content": "你好，用一句话介绍你自己" }
-  ],
-  "stream": false
-}
