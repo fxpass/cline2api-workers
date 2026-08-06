@@ -160,7 +160,8 @@ curl https://cline2api.<你的子域>.workers.dev/v1/chat/completions \
 - **API Base / Base URL**：`https://cline2api.<你的子域>.workers.dev/v1`
   （部分平台要求不带 `/v1` 的填写为 `https://cline2api.<你的子域>.workers.dev`，按平台提示试）
 - **API Key**：填你设置的 `API_KEY` 值（如 `sk-cline-xxx`）
-- **Model**：`deepseek/deepseek-v4-flash`（默认）或 `poolside/laguna-s-2.1:free`、`zai/glm-5.2`（付费，约 $0.0008/次）
+- **Model**：`deepseek/deepseek-v4-flash`（默认）或 `poolside/laguna-s-2.1:free`、`zai/glm-5.2`（付费，约 $0.0008/次）。
+  `depth/deepseek-v4-flash` 是 `deepseek/deepseek-v4-flash` 的拼写别名，同款免费，任意前缀均可。
 
 > 若 AgentScope 平台走的标准 OpenAI SDK，直接指定上述 base_url + api_key 即可。
 > 若测试报 401，请确认 `API_KEY` 变量已在 CF 配置并重新部署过。
@@ -182,6 +183,7 @@ Model:    deepseek/deepseek-v4-flash   （默认）
 | 模型 ID | 结果 |
 |---|---|
 | `deepseek/deepseek-v4-flash` | ✅ **免费可用**（默认；需完整 Cline 客户端头 + 强制 stream，已修复） |
+| `depth/deepseek-v4-flash` | ✅ **免费可用**（`deepseek/deepseek-v4-flash` 的拼写别名，同款，前端任一前缀均可） |
 | `poolside/laguna-s-2.1:free` | ✅ **免费可用** |
 | `zai/glm-5.2` | ✅ **可用（付费）**，走 Cline 系统凭证，约 $0.0008/次 |
 | `cline-free/glm-5.2` | ❌ **已下架**（上游 404 `model not found`，2026-08-06 实测） |
