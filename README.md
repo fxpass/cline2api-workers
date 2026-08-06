@@ -166,6 +166,29 @@ curl https://cline2api.<你的子域>.workers.dev/v1/chat/completions \
 > 若 AgentScope 平台走的标准 OpenAI SDK，直接指定上述 base_url + api_key 即可。
 > 若测试报 401，请确认 `API_KEY` 变量已在 CF 配置并重新部署过。
 
+### ⚠️ 高级配置：给模型加自定义请求头（防 Workers 返回 1010）
+
+**重要**：Cline 的 Workers 网关对**非浏览器 UA 的请求**可能直接拦截返回
+**`1010`**（浏览器 / 非 Cloudflare Workers 页面访问报错）。你在 AgentScope 里配完
+Base URL / API Key / Model 后，如果**一调用就报 1010 或连接失败**，十有八九是
+请求头里的 `User-Agent` 太"机器"（如 curl / python-httpx / 平台默认 SDK UA）被网关挡了。
+
+**解决办法**：在**模型的「高级设置 / 自定义请求头」**里加一个浏览器 UA：
+
+```text
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+```
+
+**AgentScope 平台具体操作**：模型配置页 → 找到该模型的**高级设置 / 自定义 Headers（请求头）**区域，
+新增一条请求头：
+- 键（Key）：`User-Agent`
+- 值（Value）：上面那串 Chrome 浏览器 UA
+
+保存后重试即可，Workers 就会把它当成正规浏览器流量放行。
+
+> 💡 记一下：**任何平台接这个 Worker 报 1010，第一反应就是补这个浏览器 UA 请求头**，
+> 因为网关只按 UA 判是不是浏览器，跟你的 API Key 正不正确无关。加完 UA 还报 401 才去查 Key。
+
 ---
 
 ## 四、使用
