@@ -151,9 +151,6 @@ async function getAccountToken(account) {
     throw new Error("refresh_no_token");
   }
   account.accessToken = accessToken;
-  // ⚠️ 2026-08-06 移除：上游可能轮换 refreshToken，但 CF Worker 内存无法持久化，
-  //    只存内存会在实例重启后拿旧 env rt 刷新失败 → OpenAI 对端全挂（线上故障实证）。
-  //    保持每次都用 env 里的 CLINE_REFRESH_TOKEN，旧 rt 持续有效反而稳定。
   // 过期时间：优先服务端，兜底 10 分钟，留 60s 余量
   const expiresAt = data?.data?.expiresAt;
   let expiry = now + 10 * 60 * 1000;
@@ -482,8 +479,6 @@ async function streamToNonStream(upstream) {
   let model = "";
   let id = "";
   let usage = null;
-  // ⚠️ 工具调用累积（按 index 聚合 arguments 分片，参考 go 版 toolAccumulator）
-  let toolCallAcc = [];
 
   while (true) {
     const { done, value } = await reader.read();
@@ -504,16 +499,6 @@ async function streamToNonStream(upstream) {
         const delta = choice.delta || {};
         if (delta.content) content += delta.content;
         if (delta.reasoning) reasoning += delta.reasoning;
-        // 聚合工具调用分片：arguments 可能是多段字符串，按 index 累积
-        if (delta.tool_calls && delta.tool_calls.length > 0) {
-          for (const tc of delta.tool_calls) {
-            const idx = tc.index || 0;
-            toolCallAcc[idx] = toolCallAcc[idx] || { id: "", name: "", arguments: "" };
-            if (tc.id) toolCallAcc[idx].id = tc.id;
-            if (tc.function?.name) toolCallAcc[idx].name = tc.function.name;
-            if (tc.function?.arguments) toolCallAcc[idx].arguments += tc.function.arguments;
-          }
-        }
         if (choice.finish_reason) finishReason = choice.finish_reason;
         if (normalized.id) id = normalized.id;
         if (normalized.model) model = normalized.model;
@@ -523,16 +508,6 @@ async function streamToNonStream(upstream) {
   }
 
   const msg = { role: "assistant", content };
-  // 非流式聚合：把累积的 tool_calls 挂回 message（之前这里直接丢掉了）
-  if (toolCallAcc.length > 0) {
-    msg.tool_calls = toolCallAcc
-      .filter((t) => t && (t.id || t.name))
-      .map((t) => ({
-        id: t.id || "call_" + Date.now() + "_" + toolCallAcc.indexOf(t),
-        type: "function",
-        function: { name: t.name || "", arguments: t.arguments || "{}" },
-      }));
-  }
   if (reasoning) msg.reasoning = reasoning;
   // ⚠️ 兜底：免费通道偶尔整个流只有 reasoning 没有 content（HTTP 200 但空）。
   //    聚合后发现 content 仍为空且 reasoning 非空时，把 reasoning 拼进 content，
@@ -577,67 +552,15 @@ async function handleAnthropic(request, env) {
   const isStream = !!req.stream;
   const sessionId = "sess_" + Date.now();
 
-  // Anthropic → OpenAI 消息转换（参考 go 版 anthropicToOpenAI）
-  // 完整处理 content blocks：text / tool_use / tool_result / image(跳过)
+  // Anthropic → OpenAI 消息转换
   const messages = [];
   if (req.system) {
-    const sysContent = typeof req.system === "string" ? req.system : extractTextFromBlocks(req.system);
+    const sysContent = typeof req.system === "string" ? req.system : JSON.stringify(req.system);
     messages.push({ role: "system", content: sysContent });
   }
   for (const m of req.messages || []) {
-    if (typeof m.content === "string") {
-      messages.push({ role: m.role, content: m.content });
-      continue;
-    }
-    if (!Array.isArray(m.content)) {
-      messages.push({ role: m.role, content: m.content ? JSON.stringify(m.content) : "" });
-      continue;
-    }
-    // content blocks → 分三类：文本 / 工具调用 / 工具结果
-    const textParts = [];
-    const toolCalls = [];
-    let toolResult = null;
-    for (const block of m.content || []) {
-      if (!block || typeof block !== "object") continue;
-      switch (block.type) {
-        case "text":
-          if (block.text) textParts.push(block.text);
-          break;
-        case "image":
-          break; // 跳过图片（上游免费通道不支持）
-        case "tool_use": {
-          let argsStr = "{}";
-          try { argsStr = typeof block.input === "string" ? block.input : JSON.stringify(block.input || {}); } catch {}
-          toolCalls.push({
-            id: block.id,
-            type: "function",
-            function: { name: block.name || "", arguments: argsStr },
-          });
-          break;
-        }
-        case "tool_result": {
-          let content = block.content;
-          if (Array.isArray(content)) {
-            content = extractTextFromBlocks(content) || "";
-          } else if (typeof content !== "string") {
-            content = JSON.stringify(content);
-          }
-          toolResult = { role: "tool", content: content || "", tool_call_id: block.tool_use_id };
-          break;
-        }
-      }
-    }
-    if (m.role === "assistant" && toolCalls.length > 0) {
-      messages.push({
-        role: "assistant",
-        content: textParts.join("\n"),
-        tool_calls: toolCalls,
-      });
-    } else if (toolResult) {
-      messages.push(toolResult); // role: "tool"
-    } else {
-      messages.push({ role: m.role, content: textParts.join("\n") });
-    }
+    const content = typeof m.content === "string" ? m.content : JSON.stringify(m.content);
+    messages.push({ role: m.role, content });
   }
 
   const body = {
@@ -755,8 +678,6 @@ async function streamResponse(upstream) {
 }
 
 // Anthropic SSE：把上游 OpenAI chunk 转成 Anthropic 格式
-// 参考 go 版 handleAnthropicStream：补全 message_start / content_block_start|stop /
-// message_delta / message_stop 完整事件序列，并累积 tool_use（arguments 分片）。
 async function streamResponseAnthropic(upstream) {
   const { readable, writable } = new TransformStream();
   const writer = writable.getWriter();
@@ -764,34 +685,9 @@ async function streamResponseAnthropic(upstream) {
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
 
-  const emit = (event, data) =>
-    writer.write(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
-
   let buf = "";
   (async () => {
     try {
-      const msgID = "msg_" + Date.now().toString(16) + Math.random().toString(16).slice(2, 8);
-      let stopReason = "end_turn";
-      let textIndex = -1;
-      let hasText = false;
-      // tool 累积器：index -> {id, name, args, started}
-      const toolAccs = new Map();
-      let usageOut = 0;
-
-      // 标准 Anthropic 事件序列：message_start 先行
-      await emit("message_start", {
-        type: "message_start",
-        message: {
-          id: msgID,
-          type: "message",
-          role: "assistant",
-          content: [],
-          model: "",
-          stop_reason: null,
-          usage: { input_tokens: 0, output_tokens: 0 },
-        },
-      });
-
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -800,89 +696,30 @@ async function streamResponseAnthropic(upstream) {
         while ((idx = buf.indexOf("\n")) >= 0) {
           const line = buf.slice(0, idx);
           buf = buf.slice(idx + 1);
-          if (!line.startsWith("data:")) continue;
-          const payload = line.slice(5).trim();
-          if (payload === "" || payload === "[DONE]") continue;
-          try {
-            const obj = JSON.parse(payload);
-            const normalized = unwrapData(obj);
-            if (normalized.usage?.completion_tokens) usageOut = normalized.usage.completion_tokens;
-            const choice = normalized?.choices?.[0];
-            if (!choice) continue;
-            const delta = choice.delta || {};
-
-            // 文本增量：首次出现时先发 content_block_start
-            if (delta.content) {
-              if (!hasText) {
-                hasText = true;
-                textIndex++;
-                await emit("content_block_start", {
-                  type: "content_block_start",
-                  index: textIndex,
-                  content_block: { type: "text", text: "" },
-                });
+          if (line.startsWith("data:")) {
+            const payload = line.slice(5).trim();
+            if (payload === "" || payload === "[DONE]") continue;
+            try {
+              const obj = JSON.parse(payload);
+              const normalized = unwrapData(obj);
+              const choice = normalized?.choices?.[0];
+              if (!choice) continue;
+              const delta = choice.delta || {};
+              if (delta.content) {
+                await writer.write(encoder.encode("event: content_block_delta\ndata: " + JSON.stringify({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: delta.content } }) + "\n\n"));
               }
-              await emit("content_block_delta", {
-                type: "content_block_delta",
-                index: textIndex,
-                delta: { type: "text_delta", text: delta.content },
-              });
-            }
-
-            // 工具调用：累积 arguments 分片，首片时发 start（input 留空，随后用 input_json_delta 流式补全）
-            if (delta.tool_calls && delta.tool_calls.length > 0) {
-              for (const tc of delta.tool_calls) {
-                const idx = tc.index || 0;
-                let acc = toolAccs.get(idx);
-                if (!acc) {
-                  acc = { id: "", name: "", args: "", started: false };
-                  toolAccs.set(idx, acc);
-                }
-                if (tc.id) acc.id = tc.id;
-                if (tc.function?.name) acc.name = tc.function.name;
-                if (!acc.started && acc.id && acc.name) {
-                  acc.started = true;
-                  await emit("content_block_start", {
-                    type: "content_block_start",
-                    index: idx,
-                    content_block: { type: "tool_use", id: acc.id, name: acc.name, input: {} },
-                  });
-                }
-                if (tc.function?.arguments) {
-                  acc.args += tc.function.arguments;
-                  await emit("content_block_delta", {
-                    type: "content_block_delta",
-                    index: idx,
-                    delta: { type: "input_json_delta", partial_json: tc.function.arguments },
-                  });
+              if (delta.tool_calls && delta.tool_calls.length > 0) {
+                for (const tc of delta.tool_calls) {
+                  await writer.write(encoder.encode("event: content_block_delta\ndata: " + JSON.stringify({ type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: JSON.stringify(tc.function?.arguments || "") } }) + "\n\n"));
                 }
               }
-            }
-
-            if (choice.finish_reason) {
-              if (choice.finish_reason === "tool_calls") stopReason = "tool_use";
-              else if (choice.finish_reason === "length") stopReason = "max_tokens";
-            }
-          } catch {}
+            } catch {}
+          }
         }
       }
-
-      // 收尾：关闭文本块 + 所有未关闭的 tool 块
-      if (hasText) {
-        await emit("content_block_stop", { type: "content_block_stop", index: textIndex });
-      }
-      for (const [idx, acc] of toolAccs) {
-        if (acc.started) {
-          await emit("content_block_stop", { type: "content_block_stop", index: idx });
-        }
-      }
-
-      await emit("message_delta", {
-        type: "message_delta",
-        delta: { stop_reason: stopReason, stop_sequence: null },
-        usage: { output_tokens: usageOut },
-      });
-      await emit("message_stop", { type: "message_stop" });
+      // 结束事件
+      await writer.write(encoder.encode("event: message_delta\ndata: " + JSON.stringify({ type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 0 } }) + "\n\n"));
+      await writer.write(encoder.encode("event: message_stop\ndata: " + JSON.stringify({ type: "message_stop" }) + "\n\n"));
     } catch (e) {
     } finally {
       try { await writer.close(); } catch {}
@@ -901,54 +738,21 @@ async function streamResponseAnthropic(upstream) {
 }
 
 // OpenAI 非流式 → Anthropic 非流式
-// 参考 go 版 openAIToAnthropic：tool_calls → tool_use content blocks，finish_reason 映射
 function openAItoAnthropic(openAI) {
   const choice = openAI?.choices?.[0];
-  const msg = choice?.message || {};
-  const content = msg.content || "";
-  const contentBlocks = [];
-  if (content) contentBlocks.push({ type: "text", text: content });
-
-  let stopReason = "end_turn";
-  const toolCalls = msg.tool_calls || [];
-  if (toolCalls.length > 0) {
-    for (const tc of toolCalls) {
-      let input = {};
-      try { input = JSON.parse(tc.function?.arguments || "{}"); } catch {}
-      contentBlocks.push({
-        type: "tool_use",
-        id: tc.id || "toolu_" + Date.now().toString(16),
-        name: tc.function?.name || "",
-        input,
-      });
-    }
-    stopReason = "tool_use";
-  } else if (choice?.finish_reason === "length") {
-    stopReason = "max_tokens";
-  }
-
+  const content = choice?.message?.content || "";
   return {
     id: openAI?.id || "msg_" + Date.now(),
     type: "message",
     role: "assistant",
     model: openAI?.model || "",
-    content: contentBlocks.length > 0 ? contentBlocks : [{ type: "text", text: "" }],
-    stop_reason: stopReason,
+    content: [{ type: "text", text: content }],
+    stop_reason: "end_turn",
     usage: {
       input_tokens: openAI?.usage?.prompt_tokens || 0,
       output_tokens: openAI?.usage?.completion_tokens || 0,
     },
   };
-}
-
-// 从 Anthropic content blocks 数组提取纯文本（用于 system / tool_result 等）
-function extractTextFromBlocks(blocks) {
-  if (!Array.isArray(blocks)) return typeof blocks === "string" ? blocks : "";
-  const parts = [];
-  for (const b of blocks) {
-    if (b && b.type === "text" && b.text) parts.push(b.text);
-  }
-  return parts.join("\n");
 }
 
 // ---------------------------------------------------------------------------
