@@ -210,14 +210,23 @@ Model:    deepseek/deepseek-v4-flash   （默认）
 
 ```
 .
-├── worker.js          # 主 Worker 代码（部署核心）
-├── cline_oauth.py     # 获取 CLINE_REFRESH_TOKEN 的脚本 ⭐
+├── worker.js               # 主 Worker 代码（部署核心）
+├── probe_free_models.py    # ⭐ 免费模型探测工具：批量探测可白嫖的免费模型
+├── cline_oauth.py          # 获取 CLINE_REFRESH_TOKEN 的脚本 ⭐
 ├── .github/workflows/
-│   └── get-token.yml  # 手动运行的工作流：在 TG 上获取 refreshToken
-├── wrangler.toml      # (可选) wrangler 命令行部署配置，用复制代码方式可忽略
-├── test_request.json  # 测试请求示例
-└── README.md          # 本文件
+│   └── get-token.yml       # 手动运行的工作流：在 TG 上获取 refreshToken
+├── wrangler.toml           # (可选) wrangler 命令行部署配置，用复制代码方式可忽略
+├── test_request.json       # 测试请求示例
+└── README.md               # 本文件
 ```
+
+> 💡 **探测最新免费模型**：上游的免费模型是**限时轮换**的，随时可能变化。
+> 想重新探测当前有哪些可白嫖的模型（`cost=N/A` 即免费，其余付费记账），运行：
+> ```bash
+> export CLINE_REFRESH_TOKEN="你的refreshToken"
+> python3 probe_free_models.py
+> ```
+> 会逐个探测候选模型并自动汇总出免费模型列表。（提醒：付费模型会扣 Cline 余额，探测时注意甄别输出里的 `paid` 项。）
 
 ## 六、获取 refreshToken 常见问题
 
