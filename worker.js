@@ -151,11 +151,9 @@ async function getAccountToken(account) {
     throw new Error("refresh_no_token");
   }
   account.accessToken = accessToken;
-  // ⚠️ 上游可能轮换 refreshToken（go 版 refreshAccountToken 专门处理了这条）：
-  //    必须把新的 rt 存回账号对象，否则旧 rt 失效后账号集体阵亡且极难排查。
-  if (data?.data?.refreshToken) {
-    account.refreshToken = data.data.refreshToken;
-  }
+  // ⚠️ 2026-08-06 移除：上游可能轮换 refreshToken，但 CF Worker 内存无法持久化，
+  //    只存内存会在实例重启后拿旧 env rt 刷新失败 → OpenAI 对端全挂（线上故障实证）。
+  //    保持每次都用 env 里的 CLINE_REFRESH_TOKEN，旧 rt 持续有效反而稳定。
   // 过期时间：优先服务端，兜底 10 分钟，留 60s 余量
   const expiresAt = data?.data?.expiresAt;
   let expiry = now + 10 * 60 * 1000;
