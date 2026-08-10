@@ -16,7 +16,7 @@
  *   curl https://你的worker/v1/chat/completions \
  *     -H "Authorization: Bearer <API_KEY>" \
  *     -H "Content-Type: application/json" \
- *     -d '{"model":"cline-free/glm-5.2","messages":[{"role":"user","content":"hi"}]}'
+ *     -d '{"model":"cline/deepseek-v4-flash","messages":[{"role":"user","content":"hi"}]}'
  */
 
 const CLINE_API_BASE = "https://api.cline.bot/api/v1";
@@ -29,21 +29,19 @@ let accounts = [];
 let accountIndex = 0;          // round-robin 游标
 let currentAccount = null;     // 当前正在使用的账号（串行队列下安全）
 
-// 模型列表（实测可用性见 README）
-// 注意：cline-pass/* 需付费订阅，
-//       deepseek/deepseek-v4-flash 和 cline-free/glm-5.2 需完整 Cline 客户端头 + 强制 stream（见 handleChat），
-//       poolside/*:free 免费可用（非流式也通）。
+// 模型列表：原样使用 Cline /v1/models 返回的完整模型 ID。
+// 不人为添加 cline/ 前缀；Telegram 会完整显示这些 ID，避免不同供应商模型名被截断后混淆。
 const MODELS = [
-  { id: "deepseek/deepseek-v4-flash", provider: "deepseek", cost: "free" },
-  { id: "poolside/laguna-s-2.1:free", provider: "poolside", cost: "free" },
-  { id: "cline-free/glm-5.2", provider: "zai", cost: "free" },
-  { id: "cline-pass/glm-5.2", provider: "zai", cost: "pass" },
-  { id: "cline-pass/deepseek-v4-flash", provider: "deepseek", cost: "pass" },
-  { id: "cline-pass/qwen3.7-max", provider: "qwen", cost: "pass" },
+  { id: "deepseek/deepseek-v4-flash", upstream: "deepseek/deepseek-v4-flash", provider: "deepseek", cost: "free" },
+  { id: "poolside/laguna-s-2.1:free", upstream: "poolside/laguna-s-2.1:free", provider: "poolside", cost: "free" },
+  { id: "cline-pass/glm-5.2", upstream: "cline-pass/glm-5.2", provider: "zai", cost: "pass" },
+  { id: "cline-pass/deepseek-v4-flash", upstream: "cline-pass/deepseek-v4-flash", provider: "deepseek", cost: "pass" },
+  { id: "cline-pass/qwen3.7-max", upstream: "cline-pass/qwen3.7-max", provider: "qwen", cost: "pass" },
 ];
 
-// 默认模型：deepseek 免费通道（完整头 + 强制 stream 已修复）
+// 默认模型：Cline 免费 DeepSeek 通道（完整头 + 强制 stream 已修复）
 const DEFAULT_MODEL = "deepseek/deepseek-v4-flash";
+const VERSION = "1.1.6";
 
 export default {
   async fetch(request, env) {
@@ -62,10 +60,9 @@ export default {
       const poolN = parseAccounts(env).length;
       return jsonResponse({
         ok: true,
-        api_key_configured: !!(env.API_KEY),
-        api_key_prefix: env.API_KEY ? env.API_KEY.slice(0, 6) + "..." : "(未配置，用默认 cline2api-default-key)",
-        refresh_token_configured: poolN > 0,
-        account_count: poolN,
+        version: VERSION,
+        authenticated: !!(env.API_KEY),
+        accounts: poolN,
         model: DEFAULT_MODEL,
       }, 200);
     }
@@ -151,6 +148,10 @@ async function getAccountToken(account) {
     throw new Error("refresh_no_token");
   }
   account.accessToken = accessToken;
+  // Cline 会在刷新时轮换 refreshToken；必须保存新 token，避免下一次刷新 invalid_grant。
+  if (typeof data?.data?.refreshToken === "string" && data.data.refreshToken.trim()) {
+    account.refreshToken = data.data.refreshToken.trim();
+  }
   // 过期时间：优先服务端，兜底 10 分钟，留 60s 余量
   const expiresAt = data?.data?.expiresAt;
   let expiry = now + 10 * 60 * 1000;
@@ -365,18 +366,20 @@ async function handleChat(request, env) {
   const isStream = !!params.stream;
   const sessionId = "sess_" + Date.now();
   const model = params.model || DEFAULT_MODEL;
+  const modelConfig = MODELS.find((m) => m.id === model);
+  const upstreamModel = modelConfig?.upstream || model;
 
-  // 构造上游 body（与原版 buildUpstreamBody 一致）
+  // 构造上游 body（外部模型 ID 与 Cline 上游模型 ID 分离）
   const body = {
-    model: model,
+    model: upstreamModel,
     max_tokens: params.max_tokens || params.max_completion_tokens || 128000,
     session_id: sessionId,
     reasoning_effort: params.reasoning_effort || params.reasoningEffort || "high",
     messages: params.messages || [],
   };
-  // ⚠️ 免费通道（deepseek + cline-free）：非流式请求被上游限流(500 empty response content)，
+  // ⚠️ 免费 DeepSeek 通道：非流式请求被上游限流(500 empty response content)，
   //    流式请求正常。所以客户端要非流式时，强制上游走 stream，再聚合返回。
-  const forceStream = !isStream && (model.startsWith("deepseek/") || model.startsWith("cline-free/"));
+  const forceStream = !isStream && upstreamModel.startsWith("deepseek/");
   if (isStream || forceStream) body.stream = true;
   // 透传可选参数
   for (const k of ["temperature", "top_p", "tools", "tool_choice", "stop", "presence_penalty", "frequency_penalty", "response_format", "user", "n", "seed"]) {
@@ -391,7 +394,7 @@ async function handleChat(request, env) {
     }
     if (isStream) {
       // 客户端要流式：直接透传 SSE
-      return streamResponse(resp);
+      return streamResponse(resp, model);
     }
     if (forceStream) {
       // 客户端要非流式 + 上游是流式：聚合 chunks 再返回
@@ -399,11 +402,13 @@ async function handleChat(request, env) {
       //    （100个chunk全是reasoning，无正式content）。这里做内容检测：空则切号重试。
       const retried = await nonStreamWithContentCheck(env, "/chat/completions", body, sessionId, resp);
       if (retried.error) return retried.error;
+      retried.data.model = model;
       return jsonResponse(retried.data, 200);
     }
     // 非流式 + 非 deepseek：原逻辑
     const raw = await resp.json();
     const normalized = unwrapData(raw);
+    normalized.model = model;
     return jsonResponse(normalized, 200);
   } catch (e) {
     return jsonResponse({ error: { message: e.message, type: "api_error" } }, 500);
@@ -551,6 +556,9 @@ async function handleAnthropic(request, env) {
 
   const isStream = !!req.stream;
   const sessionId = "sess_" + Date.now();
+  const requestedModel = req.model || DEFAULT_MODEL;
+  const modelConfig = MODELS.find((m) => m.id === requestedModel);
+  const upstreamModel = modelConfig?.upstream || requestedModel;
 
   // Anthropic → OpenAI 消息转换
   const messages = [];
@@ -564,14 +572,14 @@ async function handleAnthropic(request, env) {
   }
 
   const body = {
-    model: req.model || DEFAULT_MODEL,
+    model: upstreamModel,
     max_tokens: req.max_tokens || 128000,
     session_id: sessionId,
     reasoning_effort: "high",
     messages,
   };
-  // ⚠️ 免费通道（deepseek + cline-free）：非流式被上游限流，强制上游 stream 再聚合
-  const forceStream = !isStream && ((req.model || "").startsWith("deepseek/") || (req.model || "").startsWith("cline-free/"));
+  // ⚠️ 免费 DeepSeek 通道：非流式被上游限流，强制上游 stream 再聚合
+  const forceStream = !isStream && upstreamModel.startsWith("deepseek/");
   if (isStream || forceStream) body.stream = true;
   if (req.temperature !== undefined) body.temperature = req.temperature;
   if (req.top_p !== undefined) body.top_p = req.top_p;
@@ -622,7 +630,7 @@ function unwrapData(obj) {
 }
 
 // OpenAI SSE 流式透传（剥 data 包装）
-async function streamResponse(upstream) {
+async function streamResponse(upstream, externalModel) {
   const { readable, writable } = new TransformStream();
   const writer = writable.getWriter();
   const reader = upstream.body.getReader();
@@ -650,6 +658,7 @@ async function streamResponse(upstream) {
             try {
               const obj = JSON.parse(payload);
               const normalized = unwrapData(obj);
+              if (normalized && externalModel) normalized.model = externalModel;
               await writer.write(encoder.encode("data: " + JSON.stringify(normalized) + "\n\n"));
             } catch {
               await writer.write(encoder.encode(line + "\n"));
@@ -763,10 +772,10 @@ function handleModels() {
   const list = MODELS.map((m) => ({
     id: m.id,
     object: "model",
-    created: Date.now(),
+    created: Math.floor(Date.now() / 1000),
     owned_by: "cline",
   }));
-  return jsonResponse({ object: "list", data: list }, 200);
+  return jsonResponse({ object: "list", data: list }, 200, { "X-Cline2api-Version": VERSION });
 }
 
 function getApiKey(request, env) {
@@ -782,10 +791,10 @@ function getApiKey(request, env) {
   return xKey === expected ? expected : null;
 }
 
-function jsonResponse(obj, status) {
+function jsonResponse(obj, status, extraHeaders = {}) {
   return new Response(JSON.stringify(obj), {
     status,
-    headers: { "Content-Type": "application/json", ...corsHeaders() },
+    headers: { "Content-Type": "application/json", ...corsHeaders(), ...extraHeaders },
   });
 }
 
