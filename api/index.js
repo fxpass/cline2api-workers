@@ -46,8 +46,8 @@ const VERSION = "1.1.6";
 
 // =====================================================================
 // Vercel Edge Function 入口（vercel 分支）
-// Vercel Edge Function：固定美区（iad1 华盛顿 / sfo1 旧金山），避免路由到其他区域
-export const config = { runtime: "edge", regions: ["iad1", "sfo1"] };
+// Vercel Edge Function：不限制区域（默认全球部署，避免亚洲请求 404）
+export const config = { runtime: "edge" };
 
 // 原 Cloudflare Worker 版：export default { fetch(request, env) }
 // Vercel Edge Runtime 直接支持 Web API（Request/Response/fetch），
@@ -88,12 +88,9 @@ async function clineFetchHandler(request, env) {
     // 全局鉴权：所有端点都需要 API Key（除 OPTIONS 预检）
     // 若未配置 API_KEY，则使用内置默认 key "cline2api-default-key"
     // (可选) 设 API_KEY="" 表示完全关闭鉴权
-    // GET /v1/models
+    // GET /v1/models —— 免鉴权，让 GUI 验证能拉到模型列表
+    // （chat 等写端点仍强制鉴权；models 公开是 kilo 等代理的标准做法）
     if (request.method === "GET" && (url.pathname === "/v1/models" || url.pathname === "/models")) {
-      const key = getApiKey(request, env);
-      if (!key) {
-        return jsonResponse({ error: { message: "Invalid API key", type: "auth_error" } }, 401);
-      }
       return handleModels();
     }
 
