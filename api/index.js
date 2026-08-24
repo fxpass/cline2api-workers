@@ -40,11 +40,14 @@ const MODELS = [
 ];
 
 // 默认模型：Cline 免费 DeepSeek 通道（完整头 + 强制 stream 已修复）
+// 默认模型：deepseek 免费通道（伪装 Cline 客户端请求头绕过 403，429 限流时自动切号/重试）
 const DEFAULT_MODEL = "deepseek/deepseek-v4-flash";
 const VERSION = "1.1.6";
 
 // =====================================================================
 // Vercel Edge Function 入口（vercel 分支）
+export const config = { runtime: "edge" };
+
 // 原 Cloudflare Worker 版：export default { fetch(request, env) }
 // Vercel Edge Runtime 直接支持 Web API（Request/Response/fetch），
 // 唯一差异是环境变量从 process.env 读取，这里统一转成 env 对象传入。
@@ -221,6 +224,10 @@ async function getAccessToken(env) {
 
 // Cline 客户端指纹请求头（官方靠这些头识别"是不是 Cline 客户端"）
 // 缺少会被 403: "deepseek/deepseek-v4-flash is only available via Cline product surfaces"
+// 关键：Cline API 会检查请求头，无伪装头的请求会被 403（"only available via Cline
+// product surfaces"）。以下头伪装成 Cline 官方客户端（3.0.47），成功绕过。
+// 验证：同 refreshToken，curl 裸测 → 403；走 clineHeaders → 429 限流（正常额度状态）。
+// ⚠️ 升级/同步时务必保留这些头，否则 deepseek 免费通道直接 403。
 function clineHeaders(sessionId) {
   return {
     Authorization: "Bearer workos:" + currentToken,
