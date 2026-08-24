@@ -46,8 +46,8 @@ const VERSION = "1.1.6";
 
 // =====================================================================
 // Vercel Edge Function 入口（vercel 分支）
-// Vercel Edge Function：不限制区域（默认全球部署，避免亚洲请求 404）
-export const config = { runtime: "edge" };
+// Vercel Edge Function：区域在文件内声明（文档标准写法），美区 iad1/sfo1
+export const config = { runtime: "edge", regions: ["iad1", "sfo1"] };
 
 // 原 Cloudflare Worker 版：export default { fetch(request, env) }
 // Vercel Edge Runtime 直接支持 Web API（Request/Response/fetch），
