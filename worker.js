@@ -43,7 +43,7 @@ const MODELS = [
 
 // 默认模型：Cline 免费 DeepSeek 通道（完整头 + 强制 stream 已修复）
 const DEFAULT_MODEL = "deepseek/deepseek-v4-flash";
-const VERSION = "1.1.8";
+const VERSION = "1.1.9";
 
 export default {
   async fetch(request, env) {
@@ -771,8 +771,10 @@ function openAItoAnthropic(openAI) {
 // 辅助
 // ---------------------------------------------------------------------------
 
-// 上游全量模型目录（Cline CLI「Browse all models」同款接口，免认证，381 个模型）
+// 上游全量模型目录（Cline CLI「Browse all models」同款接口，免认证，380+ 个模型）
 const CLINE_CATALOG_URL = "https://api.cline.bot/api/v1/models";
+// 推荐模型接口：官方免费通道（deepseek-v4-flash / glm-5.3-flash）在这里声明，不带 :free 后缀
+const CLINE_RECOMMENDED_URL = "https://api.cline.bot/api/v1/ai/cline/recommended-models";
 let catalogCache = { at: 0, ids: null }; // 10 分钟内存缓存，避免每次 /v1/models 都打上游
 
 async function fetchUpstreamCatalog() {
@@ -787,6 +789,14 @@ async function fetchUpstreamCatalog() {
   return ids;
 }
 
+// 拉取官方推荐免费模型 ID（recommended-models 的 free 数组，含不带 :free 后缀的免费通道）
+async function fetchRecommendedFreeIds() {
+  const resp = await fetch(CLINE_RECOMMENDED_URL, { signal: AbortSignal.timeout(10000) });
+  if (!resp.ok) throw new Error("recommended HTTP " + resp.status);
+  const data = await resp.json();
+  return (data?.free || []).map((m) => m.id).filter((id) => typeof id === "string" && id);
+}
+
 async function handleModels() {
   // 动态拉取上游全量目录（免费模型即 id 以 ":free" 结尾的那批，与官方 CLI 一致）；
   // 失败时回退到内置静态 MODELS 清单。
@@ -796,6 +806,18 @@ async function handleModels() {
   } catch (e) {
     ids = MODELS.map((m) => m.id);
   }
+  // ⚠️ 合并 recommended-models 的 free 清单：deepseek-v4-flash / glm-5.3-flash 这类
+  //    官方推荐免费通道在目录里不带 ":free" 后缀，只拉目录会漏掉（CLI 的 Free 区就是读它）。
+  try {
+    const freeIds = await fetchRecommendedFreeIds();
+    const seen = new Set(ids);
+    for (const id of freeIds) {
+      if (!seen.has(id)) {
+        ids.push(id);
+        seen.add(id);
+      }
+    }
+  } catch (e) { /* 推荐接口失败不影响目录返回 */ }
   const list = ids.map((id) => ({
     id,
     object: "model",
