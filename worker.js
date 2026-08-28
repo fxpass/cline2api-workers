@@ -43,7 +43,7 @@ const MODELS = [
 
 // 默认模型：Cline 免费 DeepSeek 通道（完整头 + 强制 stream 已修复）
 const DEFAULT_MODEL = "deepseek/deepseek-v4-flash";
-const VERSION = "1.1.11";
+const VERSION = "1.1.12";
 
 export default {
   async fetch(request, env) {
@@ -772,40 +772,54 @@ function openAItoAnthropic(openAI) {
 // 辅助
 // ---------------------------------------------------------------------------
 
+const CLINE_CATALOG_URL = "https://api.cline.bot/api/v1/models";
 const CLINE_RECOMMENDED_URL = "https://api.cline.bot/api/v1/ai/cline/recommended-models";
-// 官方推荐模型（recommended-models，免认证）：免费通道 + 推荐位 + clinePass，
-// 作为 /v1/models 的主数据源（「获取模型」拉到的就是官方 curated 清单，约 20 个）。
-// chat 转发是透传：即使不在列表里，全量目录中的任意模型 ID 也能直接请求。
-async function fetchRecommendedModelIds() {
+// /v1/models 数据源 = 全量目录里带 ":free" 后缀的模型（约 18 个）
+//                  ∪ recommended-models.free（官方免费通道 3 个：deepseek-v4-flash /
+//                  glm-5.3-flash 等，不带 :free 后缀，必须单独拉）
+// 全部为免费模型；chat 转发是透传，列表外任意模型 ID 依然可以直接请求。
+async function fetchCatalogFreeIds() {
+  const resp = await fetch(CLINE_CATALOG_URL, { signal: AbortSignal.timeout(10000) });
+  if (!resp.ok) throw new Error("models HTTP " + resp.status);
+  const data = await resp.json();
+  const ids = (data?.data || [])
+    .map((m) => m.id)
+    .filter((id) => typeof id === "string" && id.endsWith(":free"));
+  if (!ids.length) throw new Error("empty catalog free");
+  return ids;
+}
+
+async function fetchRecommendedFreeIds() {
   const resp = await fetch(CLINE_RECOMMENDED_URL, { signal: AbortSignal.timeout(10000) });
   if (!resp.ok) throw new Error("recommended HTTP " + resp.status);
   const data = await resp.json();
-  const out = [];
-  const seen = new Set();
-  const add = (arr) => {
-    for (const m of arr || []) {
-      const id = m && m.id;
-      if (typeof id === "string" && id && !seen.has(id)) {
-        seen.add(id);
-        out.push(id);
-      }
-    }
-  };
-  add(data?.free);        // 官方免费通道（deepseek-v4-flash / glm-5.3-flash / laguna 等）
-  add(data?.recommended); // 推荐位（kimi-k3 / claude-opus-5 / grok-4.5 / gpt-5.6-sol 等，NEW 标记）
-  add(data?.clinePass);   // 订阅模型（cline-pass/*）
-  if (!out.length) throw new Error("empty recommended");
-  return out;
+  const ids = (data?.free || []).map((m) => m.id).filter((id) => typeof id === "string" && id);
+  if (!ids.length) throw new Error("empty recommended free");
+  return ids;
 }
 
 async function handleModels() {
-  // 动态拉官方 recommended-models；失败时回退到内置静态 MODELS 清单。
-  let ids;
+  // 双源合并免费模型；都失败时回退到内置静态 MODELS 清单。
+  const ids = [];
+  const seen = new Set();
+  const add = (arr) => {
+    for (const id of arr || []) {
+      if (!seen.has(id)) {
+        seen.add(id);
+        ids.push(id);
+      }
+    }
+  };
+  let ok = false;
   try {
-    ids = await fetchRecommendedModelIds();
-  } catch (e) {
-    ids = MODELS.map((m) => m.id);
-  }
+    add(await fetchCatalogFreeIds());
+    ok = true;
+  } catch (e) { /* 目录失败继续尝试推荐源 */ }
+  try {
+    add(await fetchRecommendedFreeIds());
+    ok = true;
+  } catch (e) { /* 推荐源失败继续 */ }
+  if (!ok) ids.push(...MODELS.map((m) => m.id));
   const list = ids.map((id) => ({
     id,
     object: "model",
