@@ -9,8 +9,9 @@
  *  3. SSE 流式响应剥掉上游 {data:{...}} 包装，透传给客户端
  *
  * 环境变量：
- *  - CLINE_REFRESH_TOKEN (必需)  Cline 账号的 refreshToken
- *  - API_KEY                (可选) 自定义访问 key；不设置则每次部署随机生成并打印到日志
+ *  - CLINE_REFRESH_TOKEN (必需)  Cline 账号的 refreshToken，多账号用英文逗号分隔
+ *                                （面板普通变量已不支持多行；wrangler secret 也可用换行分隔）
+ *  - API_KEY                (可选) 自定义访问 key；不设置则使用内置默认 key "cline2api-default-key"
  *
  * 用法（OpenAI 兼容）：
  *   curl https://你的worker/v1/chat/completions \
@@ -37,12 +38,12 @@ const MODELS = [
   { id: "cline-pass/glm-5.2", upstream: "cline-pass/glm-5.2", provider: "zai", cost: "pass" },
   { id: "cline-pass/deepseek-v4-flash", upstream: "cline-pass/deepseek-v4-flash", provider: "deepseek", cost: "pass" },
   { id: "cline-pass/qwen3.7-max", upstream: "cline-pass/qwen3.7-max", provider: "qwen", cost: "pass" },
-  { id: "zai/glm-5.3-flash", upstream: "zai/glm-5.3-flash", provider: "zai", cost: "free" },
+  { id: "z-ai/glm-5.3-flash", upstream: "z-ai/glm-5.3-flash", provider: "zai", cost: "free" },
 ];
 
 // 默认模型：Cline 免费 DeepSeek 通道（完整头 + 强制 stream 已修复）
 const DEFAULT_MODEL = "deepseek/deepseek-v4-flash";
-const VERSION = "1.1.6";
+const VERSION = "1.1.8";
 
 export default {
   async fetch(request, env) {
@@ -98,10 +99,11 @@ export default {
 // Token 管理
 // ---------------------------------------------------------------------------
 
-// 从环境变量解析账号池：CLINE_REFRESH_TOKEN 每行一个
+// 从环境变量解析账号池：CLINE_REFRESH_TOKEN 用英文逗号分隔（Cloudflare 面板普通变量
+// 现已不支持多行，保存时换行会被合并成单行），同时兼容换行分隔（wrangler secret 多行粘贴旧写法）。
 function parseAccounts(env) {
   const raw = env.CLINE_REFRESH_TOKEN || "";
-  const tokens = raw.split("\n").map((s) => s.trim()).filter((s) => s.length > 8);
+  const tokens = raw.split(/[\n,]+/).map((s) => s.trim()).filter((s) => s.length > 8);
   if (tokens.length === 0) return [];
 
   // 若 token 列表变化（增删账号），重建账号池
@@ -380,7 +382,7 @@ async function handleChat(request, env) {
   };
   // ⚠️ 免费 DeepSeek 通道：非流式请求被上游限流(500 empty response content)，
   //    流式请求正常。所以客户端要非流式时，强制上游走 stream，再聚合返回。
-  const forceStream = !isStream && upstreamModel.startsWith("deepseek/");
+  const forceStream = !isStream && (upstreamModel.startsWith("deepseek/") || upstreamModel.endsWith(":free"));
   if (isStream || forceStream) body.stream = true;
   // 透传可选参数
   for (const k of ["temperature", "top_p", "tools", "tool_choice", "stop", "presence_penalty", "frequency_penalty", "response_format", "user", "n", "seed"]) {
@@ -580,7 +582,7 @@ async function handleAnthropic(request, env) {
     messages,
   };
   // ⚠️ 免费 DeepSeek 通道：非流式被上游限流，强制上游 stream 再聚合
-  const forceStream = !isStream && upstreamModel.startsWith("deepseek/");
+  const forceStream = !isStream && (upstreamModel.startsWith("deepseek/") || upstreamModel.endsWith(":free"));
   if (isStream || forceStream) body.stream = true;
   if (req.temperature !== undefined) body.temperature = req.temperature;
   if (req.top_p !== undefined) body.top_p = req.top_p;
@@ -769,9 +771,33 @@ function openAItoAnthropic(openAI) {
 // 辅助
 // ---------------------------------------------------------------------------
 
-function handleModels() {
-  const list = MODELS.map((m) => ({
-    id: m.id,
+// 上游全量模型目录（Cline CLI「Browse all models」同款接口，免认证，381 个模型）
+const CLINE_CATALOG_URL = "https://api.cline.bot/api/v1/models";
+let catalogCache = { at: 0, ids: null }; // 10 分钟内存缓存，避免每次 /v1/models 都打上游
+
+async function fetchUpstreamCatalog() {
+  const now = Date.now();
+  if (catalogCache.ids && now - catalogCache.at < 10 * 60 * 1000) return catalogCache.ids;
+  const resp = await fetch(CLINE_CATALOG_URL, { signal: AbortSignal.timeout(10000) });
+  if (!resp.ok) throw new Error("models HTTP " + resp.status);
+  const data = await resp.json();
+  const ids = (data?.data || []).map((m) => m.id).filter((id) => typeof id === "string" && id);
+  if (!ids.length) throw new Error("empty catalog");
+  catalogCache = { at: now, ids };
+  return ids;
+}
+
+async function handleModels() {
+  // 动态拉取上游全量目录（免费模型即 id 以 ":free" 结尾的那批，与官方 CLI 一致）；
+  // 失败时回退到内置静态 MODELS 清单。
+  let ids;
+  try {
+    ids = await fetchUpstreamCatalog();
+  } catch (e) {
+    ids = MODELS.map((m) => m.id);
+  }
+  const list = ids.map((id) => ({
+    id,
     object: "model",
     created: Math.floor(Date.now() / 1000),
     owned_by: "cline",
