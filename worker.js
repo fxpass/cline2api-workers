@@ -43,7 +43,7 @@ const MODELS = [
 
 // 默认模型：Cline 免费 DeepSeek 通道（完整头 + 强制 stream 已修复）
 const DEFAULT_MODEL = "deepseek/deepseek-v4-flash";
-const VERSION = "1.1.9";
+const VERSION = "1.1.10";
 
 export default {
   async fetch(request, env) {
@@ -380,9 +380,10 @@ async function handleChat(request, env) {
     reasoning_effort: params.reasoning_effort || params.reasoningEffort || "high",
     messages: params.messages || [],
   };
-  // ⚠️ 免费 DeepSeek 通道：非流式请求被上游限流(500 empty response content)，
-  //    流式请求正常。所以客户端要非流式时，强制上游走 stream，再聚合返回。
-  const forceStream = !isStream && (upstreamModel.startsWith("deepseek/") || upstreamModel.endsWith(":free"));
+  // ⚠️ 上游免费通道（含 deepseek-v4-flash / glm-5.3-flash 等推荐免费模型）对非流式请求
+  //    返回 500 "empty response content"，流式正常。客户端要非流式时一律强制上游走
+  //    stream 再聚合返回（与 ai-gateway 的 item4 修复对齐；聚合器兼容 SSE 与 JSON 两种上游响应）。
+  const forceStream = !isStream;
   if (isStream || forceStream) body.stream = true;
   // 透传可选参数
   for (const k of ["temperature", "top_p", "tools", "tool_choice", "stop", "presence_penalty", "frequency_penalty", "response_format", "user", "n", "seed"]) {
@@ -581,8 +582,8 @@ async function handleAnthropic(request, env) {
     reasoning_effort: "high",
     messages,
   };
-  // ⚠️ 免费 DeepSeek 通道：非流式被上游限流，强制上游 stream 再聚合
-  const forceStream = !isStream && (upstreamModel.startsWith("deepseek/") || upstreamModel.endsWith(":free"));
+  // ⚠️ 同上：非流式一律强制上游 stream 再聚合（免费通道非流式会 500）
+  const forceStream = !isStream;
   if (isStream || forceStream) body.stream = true;
   if (req.temperature !== undefined) body.temperature = req.temperature;
   if (req.top_p !== undefined) body.top_p = req.top_p;
